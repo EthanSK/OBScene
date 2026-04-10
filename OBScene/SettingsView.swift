@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 
 struct SettingsView: View {
     @EnvironmentObject var configStore: ConfigStore
@@ -9,9 +10,32 @@ struct SettingsView: View {
     @State private var obsPassword: String = ""
     @State private var isConnecting = false
 
+    @State private var launchAtLogin: Bool = false
+    @State private var launchAtLoginError: String? = nil
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // General
+                GroupBox(label: Label("General", systemImage: "gearshape")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Launch at Login", isOn: $launchAtLogin)
+                            .onChange(of: launchAtLogin) { newValue in
+                                setLaunchAtLogin(newValue)
+                            }
+                        if let error = launchAtLoginError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        } else {
+                            Text("Automatically start OBScene when you log in.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 // OBS Connection
                 GroupBox(label: Label("OBS WebSocket Connection", systemImage: "network")) {
                     VStack(alignment: .leading, spacing: 12) {
@@ -150,6 +174,43 @@ struct SettingsView: View {
             obsHost = configStore.config.obsHost
             obsPort = String(configStore.config.obsPort)
             obsPassword = configStore.config.obsPassword
+            refreshLaunchAtLoginStatus()
+        }
+    }
+
+    private func refreshLaunchAtLoginStatus() {
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        let service = SMAppService.mainApp
+        let currentlyEnabled = service.status == .enabled
+        guard enabled != currentlyEnabled else { return }
+
+        do {
+            if enabled {
+                try service.register()
+            } else {
+                try service.unregister()
+            }
+            launchAtLoginError = nil
+            // Status may not flip immediately when the user has to approve in
+            // System Settings, so reflect the actual status rather than intent.
+            DispatchQueue.main.async {
+                let actual = SMAppService.mainApp.status == .enabled
+                if actual != enabled {
+                    launchAtLogin = actual
+                    if enabled && SMAppService.mainApp.status == .requiresApproval {
+                        launchAtLoginError = "Approve OBScene in System Settings > General > Login Items."
+                    }
+                }
+            }
+        } catch {
+            launchAtLoginError = "Failed to update: \(error.localizedDescription)"
+            // Revert toggle to reflect actual status.
+            DispatchQueue.main.async {
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
         }
     }
 
