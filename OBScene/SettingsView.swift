@@ -177,6 +177,7 @@ struct SettingsView: View {
         configStore.config.obsHost = obsHost
         configStore.config.obsPort = port
         configStore.config.obsPassword = obsPassword
+        configStore.config.hasBeenConfigured = true
 
         isConnecting = true
 

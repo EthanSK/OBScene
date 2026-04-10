@@ -12,6 +12,7 @@ struct AppConfig: Codable, Equatable {
     var startStreaming: Bool = false
     var triggerDelay: Int = 15
     var requiredExternalDisplays: Int = 2
+    var hasBeenConfigured: Bool = false
 }
 
 class ConfigStore: ObservableObject {

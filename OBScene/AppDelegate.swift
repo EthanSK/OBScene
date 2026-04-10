@@ -118,7 +118,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func connectToOBSIfConfigured() {
         let config = configStore.config
-        guard !config.obsHost.isEmpty else { return }
+        guard config.hasBeenConfigured, !config.obsHost.isEmpty else { return }
         obsManager.connect(
             host: config.obsHost,
             port: config.obsPort,
