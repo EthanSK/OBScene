@@ -17,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
+        UserNotifier.requestPermission()
         displayMonitor.startMonitoring()
         connectToOBSIfConfigured()
 

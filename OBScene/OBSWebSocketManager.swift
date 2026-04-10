@@ -464,7 +464,10 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     func startRecording() {
-        sendRequest("StartRecord")
+        sendRequest("StartRecord") { _ in
+            ActivityLog.shared.log(.recordingStarted, "Recording started")
+            UserNotifier.post(title: "OBScene", body: "Recording started")
+        }
     }
 
     func stopRecording() {
@@ -472,7 +475,10 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     func startStreaming() {
-        sendRequest("StartStream")
+        sendRequest("StartStream") { _ in
+            ActivityLog.shared.log(.streamingStarted, "Streaming started")
+            UserNotifier.post(title: "OBScene", body: "Streaming started")
+        }
     }
 
     func stopStreaming() {

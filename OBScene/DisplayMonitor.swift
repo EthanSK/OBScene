@@ -69,6 +69,18 @@ class DisplayMonitor {
 
         NotificationCenter.default.post(name: .externalDisplayCountChanged, object: nil)
 
+        if externalDisplayCount > previousCount {
+            ActivityLog.shared.log(
+                .displayConnected,
+                "External display connected (\(externalDisplayCount) total)"
+            )
+        } else if externalDisplayCount < previousCount {
+            ActivityLog.shared.log(
+                .displayDisconnected,
+                "External display disconnected (\(externalDisplayCount) total)"
+            )
+        }
+
         let config = ConfigStore.shared.config
         let requiredDisplays = config.requiredExternalDisplays
 
@@ -82,6 +94,7 @@ class DisplayMonitor {
         // "displays unplugged" trigger so listeners can stop recording/streaming.
         if externalDisplayCount < requiredDisplays && previousCount >= requiredDisplays {
             cancelPendingTrigger()
+            ActivityLog.shared.log(.info, "Pending trigger cancelled")
             executeUnplugTrigger()
         }
     }
@@ -109,6 +122,7 @@ class DisplayMonitor {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
 
         print("[OBScene] Display trigger scheduled in \(delay) seconds")
+        ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in \(delay)s")
     }
 
     private func cancelPendingTrigger() {
@@ -116,7 +130,7 @@ class DisplayMonitor {
         triggerWorkItem = nil
     }
 
-    private func executeTrigger() {
+    func executeTrigger() {
         triggerWorkItem = nil
 
         let config = ConfigStore.shared.config
@@ -124,10 +138,12 @@ class DisplayMonitor {
 
         guard obs.isConnected else {
             print("[OBScene] Trigger fired but OBS is not connected")
+            ActivityLog.shared.log(.info, "Trigger fired, but OBS not connected")
             return
         }
 
         print("[OBScene] Display trigger fired! Executing OBS actions...")
+        ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions")
 
         NotificationCenter.default.post(name: .displayTriggerFired, object: nil)
 

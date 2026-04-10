@@ -4,6 +4,7 @@ import ServiceManagement
 struct SettingsView: View {
     @EnvironmentObject var configStore: ConfigStore
     @EnvironmentObject var obsManager: OBSWebSocketManager
+    @ObservedObject private var activityLog = ActivityLog.shared
 
     @State private var obsHost: String = ""
     @State private var obsPort: String = ""
@@ -174,8 +175,45 @@ struct SettingsView: View {
                                 .disabled(!configStore.config.startStreaming)
                                 .padding(.leading, 20)
                         }
+
+                        HStack {
+                            Spacer()
+                            Button("Test Action") {
+                                DisplayMonitor.shared.executeTrigger()
+                            }
+                            .disabled(!obsManager.isConnected)
+                        }
                     }
                     .padding(.vertical, 4)
+                }
+
+                // Activity
+                GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if activityLog.events.isEmpty {
+                            Text("No activity yet. Connect a display or run a test action.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .italic()
+                                .padding(.vertical, 4)
+                        } else {
+                            ForEach(activityLog.events.prefix(8)) { event in
+                                HStack(spacing: 8) {
+                                    Image(systemName: event.kind.symbol)
+                                        .foregroundColor(.accentColor)
+                                        .frame(width: 16)
+                                    Text(event.message)
+                                        .font(.caption)
+                                    Spacer()
+                                    Text(Self.activityFormatter.string(from: event.timestamp))
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Spacer()
@@ -190,6 +228,13 @@ struct SettingsView: View {
             refreshLaunchAtLoginStatus()
         }
     }
+
+    private static let activityFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .medium
+        return f
+    }()
 
     private func refreshLaunchAtLoginStatus() {
         launchAtLogin = SMAppService.mainApp.status == .enabled

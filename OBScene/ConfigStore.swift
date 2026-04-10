@@ -1,5 +1,89 @@
 import Foundation
 import Combine
+import UserNotifications
+
+struct ActivityEvent: Identifiable, Equatable {
+    enum Kind {
+        case displayConnected
+        case displayDisconnected
+        case triggerScheduled
+        case triggerFired
+        case recordingStarted
+        case streamingStarted
+        case info
+
+        var symbol: String {
+            switch self {
+            case .displayConnected: return "display.2"
+            case .displayDisconnected: return "display.trianglebadge.exclamationmark"
+            case .triggerScheduled: return "clock"
+            case .triggerFired: return "bolt.fill"
+            case .recordingStarted: return "record.circle"
+            case .streamingStarted: return "dot.radiowaves.left.and.right"
+            case .info: return "info.circle"
+            }
+        }
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let message: String
+    let timestamp: Date
+
+    static func == (lhs: ActivityEvent, rhs: ActivityEvent) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+class ActivityLog: ObservableObject {
+    static let shared = ActivityLog()
+
+    @Published private(set) var events: [ActivityEvent] = []
+    private let maxEvents = 20
+
+    private init() {}
+
+    func log(_ kind: ActivityEvent.Kind, _ message: String) {
+        let event = ActivityEvent(kind: kind, message: message, timestamp: Date())
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.events.insert(event, at: 0)
+            if self.events.count > self.maxEvents {
+                self.events.removeLast(self.events.count - self.maxEvents)
+            }
+        }
+    }
+}
+
+enum UserNotifier {
+    static func requestPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error {
+                print("[OBScene] Notification permission error: \(error)")
+            } else {
+                print("[OBScene] Notification permission granted: \(granted)")
+            }
+        }
+    }
+
+    static func post(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("[OBScene] Failed to post notification: \(error)")
+            }
+        }
+    }
+}
 
 struct AppConfig: Codable, Equatable {
     var obsHost: String = "localhost"
