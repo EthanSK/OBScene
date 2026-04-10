@@ -484,4 +484,26 @@ class OBSWebSocketManager: ObservableObject {
     func stopStreaming() {
         sendRequest("StopStream")
     }
+
+    func startVirtualCam() {
+        sendRequest("StartVirtualCam") { _ in
+            ActivityLog.shared.log(.virtualCamStarted, "Virtual camera started")
+            UserNotifier.post(title: "OBScene", body: "Virtual camera started")
+        }
+    }
+
+    func stopVirtualCam() {
+        sendRequest("StopVirtualCam")
+    }
+
+    func startReplayBuffer() {
+        sendRequest("StartReplayBuffer") { _ in
+            ActivityLog.shared.log(.replayBufferStarted, "Replay buffer started")
+            UserNotifier.post(title: "OBScene", body: "Replay buffer started")
+        }
+    }
+
+    func stopReplayBuffer() {
+        sendRequest("StopReplayBuffer")
+    }
 }

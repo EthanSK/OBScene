@@ -179,13 +179,30 @@ class DisplayMonitor {
                 obs.startStreaming()
             }
         }
+
+        // Start virtual camera if enabled
+        if config.startVirtualCam {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                obs.startVirtualCam()
+            }
+        }
+
+        // Start replay buffer if enabled
+        if config.startReplayBuffer {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                obs.startReplayBuffer()
+            }
+        }
     }
 
     private func executeUnplugTrigger() {
         let config = ConfigStore.shared.config
 
-        // Nothing to do if neither stop-on-unplug option is enabled.
-        guard config.stopRecordingOnUnplug || config.stopStreamingOnUnplug else { return }
+        // Nothing to do if no stop-on-unplug option is enabled.
+        guard config.stopRecordingOnUnplug
+                || config.stopStreamingOnUnplug
+                || config.stopVirtualCamOnUnplug
+                || config.stopReplayBufferOnUnplug else { return }
 
         let obs = OBSWebSocketManager.shared
 
@@ -204,6 +221,12 @@ class DisplayMonitor {
         }
         if config.stopStreamingOnUnplug {
             obs.stopStreaming()
+        }
+        if config.stopVirtualCamOnUnplug {
+            obs.stopVirtualCam()
+        }
+        if config.stopReplayBufferOnUnplug {
+            obs.stopReplayBuffer()
         }
     }
 }

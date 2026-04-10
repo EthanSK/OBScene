@@ -11,12 +11,11 @@ struct SettingsView: View {
     @State private var obsPassword: String = ""
     @State private var isConnecting = false
 
-    @State private var launchAtLogin: Bool = false
+    @State private var launchAtLogin: Bool = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil
     @State private var launchAtLoginError: String? = nil
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 12) {
                 // First-run / welcome banner. Shown until the user has saved
                 // a working configuration once — after that it disappears so
                 // the window isn't cluttered on repeat visits.
@@ -166,7 +165,7 @@ struct SettingsView: View {
 
                 // Actions
                 GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
                         VStack(alignment: .leading, spacing: 4) {
                             Toggle("Start Recording", isOn: $configStore.config.startRecording)
                             Toggle("Also stop recording when displays are unplugged",
@@ -180,6 +179,22 @@ struct SettingsView: View {
                             Toggle("Also stop streaming when displays are unplugged",
                                    isOn: $configStore.config.stopStreamingOnUnplug)
                                 .disabled(!configStore.config.startStreaming)
+                                .padding(.leading, 20)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Start Virtual Camera", isOn: $configStore.config.startVirtualCam)
+                            Toggle("Also stop virtual camera when displays are unplugged",
+                                   isOn: $configStore.config.stopVirtualCamOnUnplug)
+                                .disabled(!configStore.config.startVirtualCam)
+                                .padding(.leading, 20)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Start Replay Buffer", isOn: $configStore.config.startReplayBuffer)
+                            Toggle("Also stop replay buffer when displays are unplugged",
+                                   isOn: $configStore.config.stopReplayBufferOnUnplug)
+                                .disabled(!configStore.config.startReplayBuffer)
                                 .padding(.leading, 20)
                         }
 
@@ -222,17 +237,16 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                Spacer()
-            }
-            .padding()
         }
-        .frame(minWidth: 480, minHeight: 560)
+        .padding()
+        .frame(minWidth: 680)
         .onAppear {
             obsHost = configStore.config.obsHost
             obsPort = String(configStore.config.obsPort)
             obsPassword = configStore.config.obsPassword
-            refreshLaunchAtLoginStatus()
+            if ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] == nil {
+                refreshLaunchAtLoginStatus()
+            }
         }
     }
 

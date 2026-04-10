@@ -20,6 +20,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var notificationObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // If OBSCENE_RENDER_SETTINGS=<path> is set, render the SettingsView
+        // to a PNG offscreen and exit. Used by the release screenshot script
+        // so we can capture the full settings view even on small external
+        // displays where a native window would be clamped to visibleFrame.
+        if let outputPath = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] {
+            renderSettingsToPNG(path: outputPath)
+            exit(0)
+        }
+
         setupMenuBar()
         // Ask for banner permission up-front so the first trigger fire has a
         // decided answer. Users who deny keep full functionality without
@@ -123,7 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         sceneMenuItem.isEnabled = false
         menu.addItem(sceneMenuItem)
 
-        displayCountMenuItem = NSMenuItem(title: "Displays: 0 / 2 external", action: nil, keyEquivalent: "")
+        displayCountMenuItem = NSMenuItem(title: "Displays: 0 / 1 external", action: nil, keyEquivalent: "")
         displayCountMenuItem.isEnabled = false
         menu.addItem(displayCountMenuItem)
 
@@ -199,6 +208,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var actions: [String] = []
         if config.startRecording { actions.append("Record") }
         if config.startStreaming { actions.append("Stream") }
+        if config.startVirtualCam { actions.append("Virtual Cam") }
+        if config.startReplayBuffer { actions.append("Replay Buffer") }
         if actions.isEmpty {
             recordingStatusMenuItem.title = "Trigger actions: scene switch only"
         } else {
@@ -240,7 +251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(obsManager)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 920),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -338,6 +349,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if config.startRecording { parts.append("Started recording") }
             if config.startStreaming { parts.append("Started streaming") }
+            if config.startVirtualCam { parts.append("Started virtual camera") }
+            if config.startReplayBuffer { parts.append("Started replay buffer") }
             let body = parts.isEmpty ? "Displays reached target count." : parts.joined(separator: "\n")
 
             UserNotifier.post(
@@ -354,6 +367,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             var parts: [String] = []
             if config.stopRecordingOnUnplug { parts.append("Stopped recording") }
             if config.stopStreamingOnUnplug { parts.append("Stopped streaming") }
+            if config.stopVirtualCamOnUnplug { parts.append("Stopped virtual camera") }
+            if config.stopReplayBufferOnUnplug { parts.append("Stopped replay buffer") }
             let body = parts.isEmpty ? "Displays disconnected." : parts.joined(separator: "\n")
             UserNotifier.post(
                 title: "OBScene: displays unplugged",
@@ -381,6 +396,83 @@ extension AppDelegate: NSWindowDelegate {
         settingsWindow = nil
     }
 }
+
+extension AppDelegate {
+    /// Offscreen render of the `SettingsView` at its natural content size,
+    /// used by the release screenshot tooling (`OBSCENE_RENDER_SETTINGS=path`).
+    fileprivate func renderSettingsToPNG(path: String) {
+        // Pretend we're connected to OBS with some plausible scenes/profiles
+        // so the settings view shows its fully-populated state rather than
+        // the "Connect to OBS to configure scenes and profiles." placeholder.
+        obsManager.isConnected = true
+        obsManager.sceneCollections = ["Untitled"]
+        obsManager.profiles = ["Untitled"]
+        obsManager.scenes = ["Scene"]
+
+        // Give the view a fixed width and let the height grow naturally,
+        // then measure. We explicitly override `minHeight` with a tiny value
+        // via `.frame` so the SettingsView's own `minHeight: 920` doesn't
+        // inflate the fitting size — we want the intrinsic content height.
+        let view = SettingsView()
+            .environmentObject(configStore)
+            .environmentObject(obsManager)
+            .frame(minWidth: 680, idealWidth: 680, maxWidth: 680,
+                   minHeight: 0, idealHeight: nil, maxHeight: .infinity)
+            .fixedSize(horizontal: true, vertical: true)
+            .background(Color(NSColor.windowBackgroundColor))
+
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 680, height: 2000)
+        hosting.layoutSubtreeIfNeeded()
+        let fitting = hosting.fittingSize
+        let size = NSSize(width: 680, height: fitting.height)
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.layoutSubtreeIfNeeded()
+
+        // Render at @2x so we get a crisp PNG suitable for Retina displays
+        // and the README. We draw into a bitmap whose pixel dimensions are
+        // double the point size.
+        let scale: CGFloat = 2.0
+        let pixelW = Int(size.width * scale)
+        let pixelH = Int(size.height * scale)
+
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelW,
+            pixelsHigh: pixelH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 32
+        ) else {
+            NSLog("[OBScene] Failed to create bitmap rep")
+            return
+        }
+        bitmap.size = size  // point size — cacheDisplay will scale up
+
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            NSLog("[OBScene] Failed to encode PNG")
+            return
+        }
+
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            NSLog("[OBScene] Rendered SettingsView to \(path) (\(pixelW)x\(pixelH))")
+        } catch {
+            NSLog("[OBScene] Failed to write \(path): \(error)")
+        }
+    }
+}
+
+/// NSWindow subclass that refuses the default "clamp to visible screen"
+/// behaviour, used only by `OBSCENE_SCREENSHOT=1` so we can render the
+/// full-height settings view on small external displays for promo shots.
+
 
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {

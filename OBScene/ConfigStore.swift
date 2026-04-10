@@ -10,6 +10,8 @@ struct ActivityEvent: Identifiable, Equatable {
         case triggerFired
         case recordingStarted
         case streamingStarted
+        case virtualCamStarted
+        case replayBufferStarted
         case info
 
         var symbol: String {
@@ -20,6 +22,8 @@ struct ActivityEvent: Identifiable, Equatable {
             case .triggerFired: return "bolt.fill"
             case .recordingStarted: return "record.circle"
             case .streamingStarted: return "dot.radiowaves.left.and.right"
+            case .virtualCamStarted: return "web.camera"
+            case .replayBufferStarted: return "memorychip"
             case .info: return "info.circle"
             }
         }
@@ -94,10 +98,14 @@ struct AppConfig: Codable, Equatable {
     var selectedScene: String = ""
     var startRecording: Bool = false
     var startStreaming: Bool = false
+    var startVirtualCam: Bool = false
+    var startReplayBuffer: Bool = false
     var stopRecordingOnUnplug: Bool = false
     var stopStreamingOnUnplug: Bool = false
-    var triggerDelay: Int = 15
-    var requiredExternalDisplays: Int = 2
+    var stopVirtualCamOnUnplug: Bool = false
+    var stopReplayBufferOnUnplug: Bool = false
+    var triggerDelay: Int = 5
+    var requiredExternalDisplays: Int = 1
     var hasBeenConfigured: Bool = false
 
     init() {}
@@ -115,8 +123,12 @@ struct AppConfig: Codable, Equatable {
         selectedScene = try container.decodeIfPresent(String.self, forKey: .selectedScene) ?? selectedScene
         startRecording = try container.decodeIfPresent(Bool.self, forKey: .startRecording) ?? startRecording
         startStreaming = try container.decodeIfPresent(Bool.self, forKey: .startStreaming) ?? startStreaming
+        startVirtualCam = try container.decodeIfPresent(Bool.self, forKey: .startVirtualCam) ?? startVirtualCam
+        startReplayBuffer = try container.decodeIfPresent(Bool.self, forKey: .startReplayBuffer) ?? startReplayBuffer
         stopRecordingOnUnplug = try container.decodeIfPresent(Bool.self, forKey: .stopRecordingOnUnplug) ?? stopRecordingOnUnplug
         stopStreamingOnUnplug = try container.decodeIfPresent(Bool.self, forKey: .stopStreamingOnUnplug) ?? stopStreamingOnUnplug
+        stopVirtualCamOnUnplug = try container.decodeIfPresent(Bool.self, forKey: .stopVirtualCamOnUnplug) ?? stopVirtualCamOnUnplug
+        stopReplayBufferOnUnplug = try container.decodeIfPresent(Bool.self, forKey: .stopReplayBufferOnUnplug) ?? stopReplayBufferOnUnplug
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
         requiredExternalDisplays = try container.decodeIfPresent(Int.self, forKey: .requiredExternalDisplays) ?? requiredExternalDisplays
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
