@@ -11,31 +11,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastTriggerMenuItem: NSMenuItem!
     private var displayCountMenuItem: NSMenuItem!
 
+    /// Tokens for the closure-based NotificationCenter observers so we can
+    /// remove exactly the registrations we added (and only those).
+    private var notificationObservers: [NSObjectProtocol] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
         displayMonitor.startMonitoring()
         connectToOBSIfConfigured()
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(displayTriggerFired),
-            name: .displayTriggerFired,
-            object: nil
+        let center = NotificationCenter.default
+
+        notificationObservers.append(
+            center.addObserver(forName: .displayTriggerFired, object: nil, queue: .main) { [weak self] note in
+                self?.displayTriggerFired(note)
+            }
         )
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(obsConnectionChanged),
-            name: .obsConnectionChanged,
-            object: nil
+        notificationObservers.append(
+            center.addObserver(forName: .obsConnectionChanged, object: nil, queue: .main) { [weak self] _ in
+                self?.obsConnectionChanged()
+            }
         )
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(displayCountChanged),
-            name: .externalDisplayCountChanged,
-            object: nil
+        notificationObservers.append(
+            center.addObserver(forName: .externalDisplayCountChanged, object: nil, queue: .main) { [weak self] note in
+                self?.displayCountChanged(note)
+            }
         )
+    }
+
+    deinit {
+        let center = NotificationCenter.default
+        for token in notificationObservers {
+            center.removeObserver(token)
+        }
+        notificationObservers.removeAll()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Tidy up shared singletons so we don't leave a CG callback registered
+        // or a WebSocket loop spinning if the process lingers (e.g. while
+        // crash reporters or system services hold us alive briefly).
+        displayMonitor.stopMonitoring()
+        obsManager.disconnect()
+
+        let center = NotificationCenter.default
+        for token in notificationObservers {
+            center.removeObserver(token)
+        }
+        notificationObservers.removeAll()
     }
 
     private func setupMenuBar() {

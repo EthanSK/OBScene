@@ -110,13 +110,43 @@ class OBSWebSocketManager: ObservableObject {
     @Published var currentScene: String = ""
     @Published var connectionError: String?
 
+    // Pending request callbacks, with the timestamp at which they were
+    // registered so we can time them out and avoid leaking forever if OBS
+    // never replies (crash, network drop, etc.).
+    private struct PendingCallback {
+        let callback: (Any?) -> Void
+        let registeredAt: Date
+    }
+
     private var webSocket: URLSessionWebSocketTask?
     private var session: URLSession?
     private var password: String = ""
-    private var pendingCallbacks: [String: (Any?) -> Void] = [:]
+    private var pendingCallbacks: [String: PendingCallback] = [:]
     private var requestCounter = 0
+    private var callbackCleanupTimer: Timer?
 
-    private init() {}
+    /// Maximum time we'll wait for a request response before considering it
+    /// timed out and evicting its callback.
+    private let callbackTimeout: TimeInterval = 30
+    /// How often the cleanup timer runs.
+    private let callbackCleanupInterval: TimeInterval = 30
+
+    /// Lock protecting `pendingCallbacks` and `requestCounter` from concurrent
+    /// access between the URLSession delegate queue and the main/timer queue.
+    private let callbackLock = NSLock()
+
+    private init() {
+        startCallbackCleanupTimer()
+    }
+
+    deinit {
+        callbackCleanupTimer?.invalidate()
+        callbackCleanupTimer = nil
+        webSocket?.cancel(with: .normalClosure, reason: nil)
+        webSocket = nil
+        session?.invalidateAndCancel()
+        session = nil
+    }
 
     // MARK: - Connection
 
@@ -130,18 +160,30 @@ class OBSWebSocketManager: ObservableObject {
             return
         }
 
-        session = URLSession(configuration: .default)
-        webSocket = session?.webSocketTask(with: url)
-        webSocket?.resume()
+        let newSession = URLSession(configuration: .default)
+        let newTask = newSession.webSocketTask(with: url)
+        session = newSession
+        webSocket = newTask
+        newTask.resume()
 
         connectionError = nil
-        receiveMessage()
+        receiveMessage(on: newTask)
     }
 
     func disconnect() {
-        webSocket?.cancel(with: .normalClosure, reason: nil)
+        // Tear down the existing task/session and drop our references BEFORE
+        // notifying observers. This way any in-flight `receiveMessage` closure
+        // will see that `webSocket` no longer matches the task it captured and
+        // bail out instead of recursing.
+        if let task = webSocket {
+            task.cancel(with: .normalClosure, reason: nil)
+        }
         webSocket = nil
+        session?.invalidateAndCancel()
         session = nil
+
+        // Fail any pending callbacks so callers don't hang forever.
+        failAllPendingCallbacks()
 
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
@@ -151,27 +193,43 @@ class OBSWebSocketManager: ObservableObject {
 
     // MARK: - Message Handling
 
-    private func receiveMessage() {
-        webSocket?.receive { [weak self] result in
+    /// Recursively receive messages from the given task. We capture the task
+    /// explicitly (instead of dereferencing `self.webSocket` again) so that if
+    /// the manager reconnects mid-flight we won't accidentally keep the old
+    /// task's receive loop alive against a new socket.
+    private func receiveMessage(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
+            guard let self = self else { return }
+            // If the task we're receiving on has been replaced (reconnect) or
+            // cleared (disconnect), stop the loop right here. The new task —
+            // if any — has its own receive loop running.
+            guard self.webSocket === task else { return }
+
             switch result {
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    self?.handleMessage(text)
+                    self.handleMessage(text)
                 case .data(let data):
                     if let text = String(data: data, encoding: .utf8) {
-                        self?.handleMessage(text)
+                        self.handleMessage(text)
                     }
                 @unknown default:
                     break
                 }
-                self?.receiveMessage()
+                // Re-check task identity before scheduling another receive,
+                // in case `handleMessage` triggered a reconnect.
+                guard self.webSocket === task else { return }
+                self.receiveMessage(on: task)
 
             case .failure(let error):
                 print("[OBScene] WebSocket error: \(error)")
+                // Don't recurse on error — let reconnection logic / the user
+                // re-establish the connection. Recursing here would just spin
+                // on a dead socket.
                 DispatchQueue.main.async {
-                    self?.isConnected = false
-                    self?.connectionError = error.localizedDescription
+                    self.isConnected = false
+                    self.connectionError = error.localizedDescription
                     NotificationCenter.default.post(name: .obsConnectionChanged, object: nil)
                 }
             }
@@ -244,9 +302,60 @@ class OBSWebSocketManager: ObservableObject {
         guard let responseData = d as? [String: Any],
               let requestId = responseData["requestId"] as? String else { return }
 
-        if let callback = pendingCallbacks.removeValue(forKey: requestId) {
+        callbackLock.lock()
+        let pending = pendingCallbacks.removeValue(forKey: requestId)
+        callbackLock.unlock()
+
+        if let pending = pending {
             let data = responseData["responseData"]
-            callback(data)
+            pending.callback(data)
+        }
+    }
+
+    // MARK: - Pending callback lifecycle
+
+    private func startCallbackCleanupTimer() {
+        // Schedule on the main run loop in common modes so it fires while
+        // menus are tracking, etc.
+        let timer = Timer(timeInterval: callbackCleanupInterval, repeats: true) { [weak self] _ in
+            self?.evictExpiredCallbacks()
+        }
+        callbackCleanupTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func evictExpiredCallbacks() {
+        let cutoff = Date().addingTimeInterval(-callbackTimeout)
+        var expired: [PendingCallback] = []
+
+        callbackLock.lock()
+        let expiredKeys = pendingCallbacks.compactMap { (key, value) -> String? in
+            value.registeredAt < cutoff ? key : nil
+        }
+        for key in expiredKeys {
+            if let value = pendingCallbacks.removeValue(forKey: key) {
+                expired.append(value)
+            }
+        }
+        callbackLock.unlock()
+
+        if !expired.isEmpty {
+            print("[OBScene] Evicted \(expired.count) timed-out OBS request callback(s)")
+        }
+        // Invoke timed-out callbacks with nil so callers can drop their state.
+        for pending in expired {
+            pending.callback(nil)
+        }
+    }
+
+    private func failAllPendingCallbacks() {
+        callbackLock.lock()
+        let all = pendingCallbacks
+        pendingCallbacks.removeAll()
+        callbackLock.unlock()
+
+        for (_, pending) in all {
+            pending.callback(nil)
         }
     }
 
@@ -284,12 +393,13 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     private func sendRequest(_ requestType: String, data: [String: Any]? = nil, completion: ((Any?) -> Void)? = nil) {
+        callbackLock.lock()
         requestCounter += 1
         let requestId = "req_\(requestCounter)"
-
         if let completion = completion {
-            pendingCallbacks[requestId] = completion
+            pendingCallbacks[requestId] = PendingCallback(callback: completion, registeredAt: Date())
         }
+        callbackLock.unlock()
 
         var request: [String: Any] = [
             "requestType": requestType,

@@ -7,6 +7,25 @@ extension Notification.Name {
     static let obsConnectionChanged = Notification.Name("obsConnectionChanged")
 }
 
+// File-scoped C-compatible callback function. Storing it in a `let` of the
+// concrete `CGDisplayReconfigurationCallBack` type guarantees we get the SAME
+// function pointer every time we register and remove it. (Passing two different
+// closure literals to register/remove would yield two different thunks and
+// silently leak the registration — which is exactly the bug we're fixing.)
+private let displayReconfigurationCallback: CGDisplayReconfigurationCallBack = { displayID, flags, userInfo in
+    guard let userInfo = userInfo else { return }
+    let monitor = Unmanaged<DisplayMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+    // Respond to display add/remove events after reconfiguration is complete
+    if flags.contains(.addFlag) || flags.contains(.removeFlag) {
+        // Only process when the reconfiguration is done (no beginFlag)
+        if !flags.contains(.beginConfigurationFlag) {
+            DispatchQueue.main.async {
+                monitor.handleDisplayChange()
+            }
+        }
+    }
+}
+
 class DisplayMonitor {
     static let shared = DisplayMonitor()
 
@@ -18,35 +37,32 @@ class DisplayMonitor {
         updateDisplayCount()
     }
 
+    deinit {
+        stopMonitoring()
+        cancelPendingTrigger()
+    }
+
     func startMonitoring() {
         guard !isMonitoring else { return }
         isMonitoring = true
 
-        CGDisplayRegisterReconfigurationCallback({ displayID, flags, userInfo in
-            guard let userInfo = userInfo else { return }
-            let monitor = Unmanaged<DisplayMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-            // Respond to display add/remove events after reconfiguration is complete
-            if flags.contains(.addFlag) || flags.contains(.removeFlag) {
-                // Use beginTransaction/endTransaction pattern:
-                // Only process when the reconfiguration is done (no beginFlag)
-                if !flags.contains(.beginConfigurationFlag) {
-                    DispatchQueue.main.async {
-                        monitor.handleDisplayChange()
-                    }
-                }
-            }
-        }, Unmanaged.passUnretained(self).toOpaque())
+        // Use passUnretained: DisplayMonitor.shared lives for the app lifetime,
+        // and we don't want the C registration to keep an extra retain that
+        // would only be released by an explicit unregister.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        CGDisplayRegisterReconfigurationCallback(displayReconfigurationCallback, context)
     }
 
     func stopMonitoring() {
         guard isMonitoring else { return }
         isMonitoring = false
-        CGDisplayRemoveReconfigurationCallback({ displayID, flags, userInfo in
-            // Matching callback signature for removal
-        }, Unmanaged.passUnretained(self).toOpaque())
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        // Pass the SAME function pointer we registered with so the runtime can
+        // actually find and remove the registration.
+        CGDisplayRemoveReconfigurationCallback(displayReconfigurationCallback, context)
     }
 
-    private func handleDisplayChange() {
+    fileprivate func handleDisplayChange() {
         let previousCount = externalDisplayCount
         updateDisplayCount()
 
