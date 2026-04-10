@@ -17,6 +17,13 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // First-run / welcome banner. Shown until the user has saved
+                // a working configuration once — after that it disappears so
+                // the window isn't cluttered on repeat visits.
+                if !configStore.config.hasBeenConfigured {
+                    welcomeBanner
+                }
+
                 // General
                 GroupBox(label: Label("General", systemImage: "gearshape")) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -272,18 +279,57 @@ struct SettingsView: View {
         }
     }
 
+    private var welcomeBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Welcome to OBScene")
+                    .font(.headline)
+                Text("Connect to OBS below, choose the scene/profile to switch to, and pick the trigger actions. When your external displays come online, OBScene will switch OBS and (optionally) start recording or streaming automatically.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Tip: in OBS, enable Tools → WebSocket Server Settings, then paste the password below.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.accentColor.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.28), lineWidth: 1)
+        )
+    }
+
     private var connectionStatusView: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Circle()
-                .fill(obsManager.isConnected ? Color.green : Color.red)
+                .fill(obsManager.isConnected ? Color.green : (obsManager.connectionError != nil ? Color.orange : Color.red))
                 .frame(width: 8, height: 8)
-            if let error = obsManager.connectionError {
-                Text(error)
+            if let error = obsManager.connectionError, !error.isEmpty {
+                // Show the error inline but truncated — the window can be
+                // narrow, and the full error is in the log anyway.
+                Text("Error: \(error)")
                     .font(.caption)
                     .foregroundColor(.red)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .help(error)
+            } else if obsManager.isConnected {
+                Text("Connected")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             } else {
-                Text(obsManager.isConnected ? "Connected" : "Disconnected")
+                Text("Disconnected")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
