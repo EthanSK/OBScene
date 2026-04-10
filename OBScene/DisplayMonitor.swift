@@ -3,6 +3,7 @@ import CoreGraphics
 
 extension Notification.Name {
     static let displayTriggerFired = Notification.Name("displayTriggerFired")
+    static let displayUnplugTriggerFired = Notification.Name("displayUnplugTriggerFired")
     static let externalDisplayCountChanged = Notification.Name("externalDisplayCountChanged")
     static let obsConnectionChanged = Notification.Name("obsConnectionChanged")
 }
@@ -77,9 +78,11 @@ class DisplayMonitor {
             scheduleTrigger(delay: config.triggerDelay)
         }
 
-        // Cancel pending trigger if displays were disconnected
+        // Cancel pending trigger if displays were disconnected, and fire the
+        // "displays unplugged" trigger so listeners can stop recording/streaming.
         if externalDisplayCount < requiredDisplays && previousCount >= requiredDisplays {
             cancelPendingTrigger()
+            executeUnplugTrigger()
         }
     }
 
@@ -159,6 +162,32 @@ class DisplayMonitor {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 obs.startStreaming()
             }
+        }
+    }
+
+    private func executeUnplugTrigger() {
+        let config = ConfigStore.shared.config
+
+        // Nothing to do if neither stop-on-unplug option is enabled.
+        guard config.stopRecordingOnUnplug || config.stopStreamingOnUnplug else { return }
+
+        let obs = OBSWebSocketManager.shared
+
+        guard obs.isConnected else {
+            print("[OBScene] Unplug trigger fired but OBS is not connected")
+            return
+        }
+
+        print("[OBScene] Displays unplugged! Executing stop actions...")
+
+        NotificationCenter.default.post(name: .displayUnplugTriggerFired, object: nil)
+
+        // Stop immediately — no delay on teardown.
+        if config.stopRecordingOnUnplug {
+            obs.stopRecording()
+        }
+        if config.stopStreamingOnUnplug {
+            obs.stopStreaming()
         }
     }
 }

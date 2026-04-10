@@ -158,9 +158,22 @@ struct SettingsView: View {
 
                 // Actions
                 GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Start Recording", isOn: $configStore.config.startRecording)
-                        Toggle("Start Streaming", isOn: $configStore.config.startStreaming)
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Start Recording", isOn: $configStore.config.startRecording)
+                            Toggle("Also stop recording when displays are unplugged",
+                                   isOn: $configStore.config.stopRecordingOnUnplug)
+                                .disabled(!configStore.config.startRecording)
+                                .padding(.leading, 20)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Start Streaming", isOn: $configStore.config.startStreaming)
+                            Toggle("Also stop streaming when displays are unplugged",
+                                   isOn: $configStore.config.stopStreamingOnUnplug)
+                                .disabled(!configStore.config.startStreaming)
+                                .padding(.leading, 20)
+                        }
                     }
                     .padding(.vertical, 4)
                 }
