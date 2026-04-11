@@ -66,14 +66,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Refresh menu state once up-front.
         refreshMenuState()
 
-        // If the user has never configured OBS, open the settings window on
-        // first launch so they know what to do. This is the only "first-run
-        // experience" — no onboarding flow, just pop the settings.
-        if !configStore.config.hasBeenConfigured {
+        // Decide whether to pop the settings window on launch:
+        //   1. First-run (unconfigured) — always show settings so the user
+        //      knows what to do.
+        //   2. Manual launch (Finder double-click, Spotlight, Dock) — show
+        //      settings so the menu-bar app gives visible feedback rather than
+        //      silently going resident.
+        //   3. Login-item launch (SMAppService / launchd at login) — stay
+        //      silent; the user hasn't asked to see anything.
+        //
+        // We detect (3) via the AppleEvent that launched the process: when
+        // macOS starts a login item it sets the keyAELaunchedAsLogInItem
+        // property on the open-application event. Any other launch (double
+        // click, Spotlight, `open -a`) omits it.
+        let shouldShowSettingsOnLaunch =
+            !configStore.config.hasBeenConfigured || !Self.launchedAsLoginItem()
+
+        if shouldShowSettingsOnLaunch {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 self?.openSettings()
             }
         }
+    }
+
+    /// Returns true when the process was launched by macOS as a login item
+    /// (SMAppService / launchd at login), false when the user launched it
+    /// directly (Finder, Spotlight, Dock, `open -a`). Used to decide whether
+    /// to pop the settings window on launch.
+    private static func launchedAsLoginItem() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else {
+            // No AppleEvent at all — not a GUI launch. Treat as login item
+            // so we stay silent (this also covers the screenshot-render
+            // subprocess path, which exits before this is reached anyway).
+            return true
+        }
+
+        // Only the open-application event is interesting.
+        guard event.eventClass == kCoreEventClass, event.eventID == kAEOpenApplication else {
+            return false
+        }
+
+        // The login-item flag is exposed via the AEPropData descriptor under
+        // keyAEPropData; its enum value equals keyAELaunchedAsLogInItem when
+        // launchd started us as a login item.
+        let propDesc = event.paramDescriptor(forKeyword: keyAEPropData)
+        return propDesc?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
+    /// Called when the user re-launches the app while it's already running
+    /// (double-clicking the .app in Finder, clicking it in the Dock, etc.).
+    /// For an LSUIElement menu-bar app this is the user's only feedback that
+    /// anything happened, so pop the settings window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            openSettings()
+        }
+        return true
     }
 
     deinit {

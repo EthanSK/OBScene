@@ -10,24 +10,28 @@ The workflow mirrors the release flow used by `producer-player`, adapted for a n
 
 ## Version source of truth
 
-The single source of truth for the semantic version is `CFBundleShortVersionString` inside [`OBScene/Info.plist`](../OBScene/Info.plist). Every other version label (landing page, GitHub release name, artifact filenames) is derived from this value.
+OBScene uses a **two-part display version** (mirrors producer-player):
 
-After changing the version, regenerate `site/version.json`:
+- **Display:** `v1.0`, `v1.1`, `v2.0` — what users see on the landing page, GitHub release names, and the logo pill
+- **Internal semver:** `1.0.0`, `1.1.0`, `2.0.0` — stored in `CFBundleShortVersionString` (patch is always `0`)
+- **Build number:** `CFBundleVersion` = `major*10000 + minor*100` — a monotonically increasing integer
+
+The single source of truth is `CFBundleShortVersionString` inside [`OBScene/Info.plist`](../OBScene/Info.plist). Every other label is derived from it.
+
+### Automatic bumping on every push
+
+The release workflow runs `./scripts/bump-version.sh minor` on every push to `main`, commits the bump back with `[skip ci]`, and then builds+signs+notarises+publishes the new `v<major>.<minor>` tag. You usually don't have to touch the version by hand.
+
+### Manual bumping
 
 ```bash
-./scripts/sync-version.sh
+./scripts/bump-version.sh           # minor bump: 1.0.0 -> 1.1.0 (display v1.1)
+./scripts/bump-version.sh minor     # same as default
+./scripts/bump-version.sh major     # major bump: 1.1.0 -> 2.0.0 (display v2.0)
+./scripts/bump-version.sh set 2.5.0 # set an explicit x.y.0 version
 ```
 
-Or do both in one step:
-
-```bash
-./scripts/bump-version.sh patch   # 1.0.0 -> 1.0.1
-./scripts/bump-version.sh minor   # 1.0.1 -> 1.1.0
-./scripts/bump-version.sh major   # 1.1.0 -> 2.0.0
-./scripts/bump-version.sh set 1.2.3
-```
-
-`bump-version.sh` updates `CFBundleShortVersionString`, recalculates `CFBundleVersion` (the integer build number), and runs `sync-version.sh` automatically.
+`bump-version.sh` updates `CFBundleShortVersionString`, recalculates `CFBundleVersion`, and runs `sync-version.sh` automatically.
 
 The release workflow fails fast if `site/version.json` is out of sync with `Info.plist`, so the check is enforced in CI.
 
@@ -50,36 +54,32 @@ The landing page's Download button reads these from `site/version.json`.
 
 | Trigger | Result |
 |---|---|
-| Push to `main`/`master` with a new `CFBundleShortVersionString` | Publishes canonical `v<version>` tag and release |
-| Push to `main`/`master` with the same version already released | Publishes `v<version>-build.<run_number>` |
-| Push tag `v*` | Builds and publishes that tag (must match `Info.plist` version) |
-| `workflow_dispatch` | Builds artifacts; publish step only runs on `main`/`master` |
+| Push to `main`/`master` | Workflow auto-bumps the minor version, commits it back with `[skip ci]`, publishes `v<major>.<minor>` tag and release |
+| Push commit containing `[skip ci]` or `chore: bump version` | Workflow short-circuits (no build, no publish) — this is how the bump-back loop is prevented |
+| Push tag `v*` | Builds and publishes that tag (must match `Info.plist` display version) |
+| `workflow_dispatch` | Uses whatever version is already in `Info.plist`; does not bump |
 
 ## Typical release flow
 
-1. Bump the version:
+Just push to main. Every push produces a new release.
 
-   ```bash
-   ./scripts/bump-version.sh patch
-   ```
+```bash
+git commit -am "feat: something"
+git push origin main
+```
 
-2. Commit and push:
+The workflow will:
 
-   ```bash
-   git add OBScene/Info.plist site/version.json
-   git commit -m "chore: bump version to $(./scripts/sync-version.sh >/dev/null && plutil -extract CFBundleShortVersionString raw OBScene/Info.plist)"
-   git push origin main
-   ```
+- Run `./scripts/bump-version.sh minor` (e.g. `1.2.0 -> 1.3.0`, display `v1.3`)
+- Commit the bump to `main` with `chore: bump version to v1.3 [skip ci]`
+- Build a universal `.app` with `swiftc` (arm64 + x86_64 via `lipo`)
+- Sign with Developer ID (or ad-hoc fall-back)
+- Notarise + staple via `notarytool` (if Apple credentials are configured)
+- Create the DMG via `hdiutil`
+- Publish the GitHub Release (`OBScene v1.3`) with both artifacts + SHA-256 sums
+- Update the stable `OBScene-latest-mac-universal.{dmg,zip}` aliases
 
-3. Watch the **Release** workflow at <https://github.com/EthanSK/OBScene/actions/workflows/release.yml>. It will:
-   - Build a universal `.app` with `swiftc` (arm64 + x86_64 via `lipo`)
-   - Sign with Developer ID (or ad-hoc fall-back)
-   - Notarise + staple via `notarytool` (if Apple credentials are configured)
-   - Create the DMG via `hdiutil`
-   - Publish the GitHub Release with both artifacts + SHA-256 sums
-   - Update the stable `OBScene-latest-mac-universal.{dmg,zip}` aliases
-
-4. Confirm the download button on the landing page now shows the new version: <https://ethansk.github.io/OBScene/>. The Pages workflow re-runs automatically when `site/version.json` changes.
+Confirm the download button on the landing page now shows the new version: <https://ethansk.github.io/OBScene/>. The Pages workflow re-runs automatically when `site/version.json` changes.
 
 ## GitHub Actions secrets
 

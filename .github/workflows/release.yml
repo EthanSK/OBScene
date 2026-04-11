@@ -13,18 +13,125 @@ permissions:
   contents: write
 
 jobs:
+  bump-version:
+    name: Bump version
+    runs-on: ubuntu-latest
+    # Only bump on branch pushes to main/master. Tag pushes and workflow_dispatch
+    # should use whatever version is already in Info.plist.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    outputs:
+      app_version: ${{ steps.bump.outputs.app_version }}
+      display_version: ${{ steps.bump.outputs.display_version }}
+      bumped_sha: ${{ steps.push.outputs.bumped_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if commit is itself a version bump
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          msg="$(git log -1 --pretty=%B)"
+          if printf '%s' "$msg" | grep -qE '\[skip ci\]|\[skip actions\]|chore: bump version'; then
+            echo "already_bumped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_bumped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        id: bump
+        if: steps.guard.outputs.already_bumped == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/bump-version.sh minor
+
+          app_version="$(python3 -c 'import plistlib; print(plistlib.load(open("OBScene/Info.plist","rb"))["CFBundleShortVersionString"])')"
+          display_version="$app_version"
+          if [[ "$app_version" =~ ^([0-9]+\.[0-9]+)\.0$ ]]; then
+            display_version="${BASH_REMATCH[1]}"
+          fi
+
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+          echo "display_version=${display_version}" >> "$GITHUB_OUTPUT"
+          echo "[bump-version] new version: ${app_version} (display: v${display_version})"
+
+      - name: Commit and push bump
+        id: push
+        if: steps.guard.outputs.already_bumped == 'false'
+        shell: bash
+        env:
+          DISPLAY_VERSION: ${{ steps.bump.outputs.display_version }}
+          APP_VERSION: ${{ steps.bump.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add OBScene/Info.plist site/version.json
+
+          if git diff --cached --quiet; then
+            echo "[bump-version] nothing to commit (version already up to date)"
+            echo "bumped_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "chore: bump version to v${DISPLAY_VERSION} [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
+
+          new_sha="$(git rev-parse HEAD)"
+          echo "bumped_sha=${new_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Handle already-bumped commit
+        if: steps.guard.outputs.already_bumped == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[bump-version] current commit is already a version bump — skipping workflow."
+          echo "[bump-version] (this run will stop here; nothing to build)"
+
   compute-version:
     name: Compute release metadata
     runs-on: ubuntu-latest
+    needs: bump-version
+    # Only proceed if the bump job ran and produced an app_version. Tag pushes
+    # and workflow_dispatch skip the bump job entirely, so handle them below.
+    if: |
+      always() && (
+        (needs.bump-version.result == 'success' && needs.bump-version.outputs.app_version != '')
+        || github.event_name == 'workflow_dispatch'
+        || startsWith(github.ref, 'refs/tags/')
+      )
     outputs:
       app_version: ${{ steps.meta.outputs.app_version }}
       display_version: ${{ steps.meta.outputs.display_version }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
       release_name: ${{ steps.meta.outputs.release_name }}
       is_tag_release: ${{ steps.meta.outputs.is_tag_release }}
+      checkout_sha: ${{ steps.meta.outputs.checkout_sha }}
     steps:
+      - name: Determine checkout ref
+        id: ref
+        shell: bash
+        env:
+          BUMPED_SHA: ${{ needs.bump-version.outputs.bumped_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BUMPED_SHA}" ]; then
+            echo "ref=${BUMPED_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
 
       - name: Sync and verify version metadata
         shell: bash
@@ -43,7 +150,7 @@ jobs:
         env:
           GITHUB_REF_NAME_ENV: ${{ github.ref_name }}
           GITHUB_REF_ENV: ${{ github.ref }}
-          GITHUB_RUN_NUMBER_ENV: ${{ github.run_number }}
+          CHECKOUT_SHA: ${{ steps.ref.outputs.ref }}
         run: |
           set -euo pipefail
 
@@ -54,7 +161,12 @@ jobs:
             exit 1
           fi
 
+          # Two-part display version (strip trailing .0 patch) — matches
+          # producer-player's toDisplayVersion logic.
           display_version="$app_version"
+          if [[ "$app_version" =~ ^([0-9]+\.[0-9]+)\.0$ ]]; then
+            display_version="${BASH_REMATCH[1]}"
+          fi
 
           if [[ "${GITHUB_REF_ENV}" == refs/tags/v* ]]; then
             release_tag="${GITHUB_REF_NAME_ENV}"
@@ -62,37 +174,19 @@ jobs:
             tag_base="${tag_version%%-*}"
             tag_base="${tag_base%%+*}"
 
-            if [[ "$tag_version" != "$app_version" && "$tag_base" != "$app_version" ]]; then
-              echo "::error::Tag '${release_tag}' does not match Info.plist version '${app_version}'."
-              echo "::error::Use v${app_version} (or v${app_version}-build.<n>) for this commit."
+            # Accept tags matching either full semver (v1.2.0) or display (v1.2).
+            if [[ "$tag_version" != "$app_version" && "$tag_base" != "$app_version" && "$tag_version" != "$display_version" && "$tag_base" != "$display_version" ]]; then
+              echo "::error::Tag '${release_tag}' does not match Info.plist version '${display_version}'."
+              echo "::error::Use v${display_version} for this commit."
               exit 1
             fi
 
-            if [[ "$tag_version" == "$app_version" ]]; then
-              release_name="OBScene v${app_version}"
-            else
-              release_name="OBScene ${release_tag}"
-            fi
-
-            {
-              echo "app_version=${app_version}"
-              echo "display_version=${display_version}"
-              echo "release_tag=${release_tag}"
-              echo "release_name=${release_name}"
-              echo "is_tag_release=true"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          build_num="${GITHUB_RUN_NUMBER_ENV}"
-          canonical_tag="v${app_version}"
-
-          if git ls-remote --tags --refs origin "${canonical_tag}" | grep -q .; then
-            release_tag="v${app_version}-build.${build_num}"
-            release_name="OBScene v${app_version} (build ${build_num})"
+            release_name="OBScene v${display_version}"
+            is_tag_release=true
           else
-            release_tag="${canonical_tag}"
-            release_name="OBScene v${app_version}"
+            release_tag="v${display_version}"
+            release_name="OBScene v${display_version}"
+            is_tag_release=false
           fi
 
           {
@@ -100,12 +194,14 @@ jobs:
             echo "display_version=${display_version}"
             echo "release_tag=${release_tag}"
             echo "release_name=${release_name}"
-            echo "is_tag_release=false"
+            echo "is_tag_release=${is_tag_release}"
+            echo "checkout_sha=${CHECKOUT_SHA}"
           } >> "$GITHUB_OUTPUT"
 
   build-mac:
     name: Build macOS (universal)
-    needs: compute-version
+    needs:
+      - compute-version
     runs-on: macos-latest
     env:
       # Copy secrets into env so later steps can reference them in `if:` expressions.
@@ -115,6 +211,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.compute-version.outputs.checkout_sha }}
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -215,7 +313,12 @@ jobs:
 
   publish-release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: |
+      always() && needs.build-mac.result == 'success' && (
+        startsWith(github.ref, 'refs/tags/')
+        || github.ref == 'refs/heads/main'
+        || github.ref == 'refs/heads/master'
+      )
     needs:
       - compute-version
       - build-mac
@@ -224,6 +327,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.compute-version.outputs.checkout_sha }}
           fetch-depth: 0
 
       - name: Download built artifacts
@@ -328,7 +432,7 @@ jobs:
         env:
           DISPLAY_VERSION: ${{ needs.compute-version.outputs.display_version }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ needs.compute-version.outputs.checkout_sha }}
           RUN_ID: ${{ github.run_id }}
           PREV_TAG: ${{ steps.changelog.outputs.prev_tag }}
           RELEASE_TAG: ${{ needs.compute-version.outputs.release_tag }}
@@ -368,7 +472,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.compute-version.outputs.release_tag }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ needs.compute-version.outputs.checkout_sha }}
           name: ${{ needs.compute-version.outputs.release_name }}
           prerelease: false
           make_latest: true

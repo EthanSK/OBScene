@@ -56,7 +56,13 @@ if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
   exit 1
 fi
 
-display_version="v$version"
+# OBScene uses two-part display versioning: x.y.0 (semver) -> vX.Y (display).
+# Mirrors producer-player's toDisplayVersion() logic.
+if [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.0$ ]]; then
+  display_version="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+else
+  display_version="v$version"
+fi
 
 repo_owner="EthanSK"
 repo_name="OBScene"
