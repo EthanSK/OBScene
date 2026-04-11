@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.5.0</string>
+	<string>1.6.0</string>
 	<key>CFBundleVersion</key>
-	<string>10500</string>
+	<string>10600</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
@@ -28,22 +28,15 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright 2024 Ethan SK. MIT License.</string>
-	<!-- Sparkle 2.x auto-update configuration. -->
-	<!-- Feed URL is served from the GitHub Pages site (site/appcast.xml). -->
-	<key>SUFeedURL</key>
-	<string>https://ethansk.github.io/OBScene/appcast.xml</string>
-	<!-- EdDSA public key matching the SPARKLE_ED_PRIVATE_KEY repo secret. -->
-	<!-- Rotating this means rotating the secret too. -->
-	<key>SUPublicEDKey</key>
-	<string>95C0XfbjGex6r+WbeNXM8iSrDJGyLiX0L+rD4jIaK6A=</string>
-	<!-- Check for updates on launch (after a short delay) and every 24h. -->
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUScheduledCheckInterval</key>
-	<integer>86400</integer>
-	<!-- Download updates in the background then prompt to install+relaunch. -->
-	<!-- Mirrors producer-player's auto-update UX. -->
 	<key>SUAutomaticallyUpdate</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://ethansk.github.io/OBScene/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>95C0XfbjGex6r+WbeNXM8iSrDJGyLiX0L+rD4jIaK6A=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
