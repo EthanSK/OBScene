@@ -483,3 +483,18 @@ jobs:
           body_path: /tmp/release_body.md
           files: |
             release-assets/*
+
+      # After publishing a release, explicitly re-deploy the landing page so
+      # site/version.json reflects the new version. This is required because
+      # the bump-back commit is pushed with GITHUB_TOKEN, which deliberately
+      # does NOT trigger further push-event workflow runs (GitHub anti-loop
+      # policy). Dispatching via workflow_dispatch bypasses that restriction.
+      - name: Re-deploy landing page for new version
+        if: needs.compute-version.outputs.is_tag_release != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh workflow run pages.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}"
