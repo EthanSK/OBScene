@@ -218,16 +218,30 @@ struct SettingsView: View {
                                 .disabled(!configStore.config.startReplayBuffer)
                                 .padding(.leading, 20)
                         }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // Testing — standalone section so it's obvious the button
+                // runs the entire trigger (scene collection + profile + scene
+                // switch + all 4 start actions), not just one action from the
+                // Trigger Actions box above.
+                GroupBox(label: Label("Testing", systemImage: "play.circle")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Dry-run the full trigger exactly as if an external display had just been plugged in. Switches scene collection, profile and scene, and runs every enabled start action. The configured trigger delay is skipped.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         HStack {
                             Spacer()
-                            Button("Test Action") {
-                                DisplayMonitor.shared.executeTrigger()
+                            Button("Simulate Display Connection") {
+                                DisplayMonitor.shared.runTestTrigger()
                             }
-                            .disabled(!obsManager.isConnected)
                         }
                     }
                     .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Activity

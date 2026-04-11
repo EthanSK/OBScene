@@ -92,7 +92,9 @@ echo "==> Creating DMG"
 DMG_STAGING="$BUILD_DIR/dmg-staging"
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
-cp -R "$APP_BUNDLE" "$DMG_STAGING/"
+# Use ditto (not `cp -R`) so Sparkle.framework's symlinked Versions/B
+# layout is preserved — otherwise notarisation rejects the DMG.
+ditto "$APP_BUNDLE" "$DMG_STAGING/$(basename "$APP_BUNDLE")"
 # Symlink to /Applications for drag-to-install UX.
 ln -s /Applications "$DMG_STAGING/Applications"
 

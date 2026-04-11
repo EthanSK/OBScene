@@ -208,6 +208,13 @@ jobs:
     needs:
       - compute-version
     runs-on: macos-latest
+    outputs:
+      # Sparkle EdDSA signature for the release ZIP, computed by
+      # `sign_update` against the SPARKLE_ED_PRIVATE_KEY secret. Consumed
+      # by the publish-release job when it regenerates site/appcast.xml.
+      sparkle_ed_signature: ${{ steps.sign-sparkle.outputs.ed_signature }}
+      sparkle_zip_filename: ${{ steps.sign-sparkle.outputs.zip_filename }}
+      sparkle_zip_size: ${{ steps.sign-sparkle.outputs.zip_size }}
     env:
       # Copy secrets into env so later steps can reference them in `if:` expressions.
       # GitHub does not allow the `secrets` context inside step-level `if:`,
@@ -305,6 +312,58 @@ jobs:
             exit 1
           fi
 
+      # Sign the final (post-notarisation + stapled) ZIP with the Sparkle
+      # EdDSA private key stored in the SPARKLE_ED_PRIVATE_KEY secret. The
+      # resulting signature is what clients use to verify the update
+      # download — the public half lives in Info.plist as SUPublicEDKey.
+      # Runs only on macOS because sign_update is a Mach-O binary.
+      - name: Sign ZIP with Sparkle (EdDSA)
+        id: sign-sparkle
+        shell: bash
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY secret is not set. Generate a key"
+            echo "::error::with Frameworks/bin/generate_keys --account obscene-sparkle"
+            echo "::error::then add the exported private key as a repo secret. See"
+            echo "::error::docs/RELEASING.md."
+            exit 1
+          fi
+
+          zips=(build/OBScene-*-mac-universal.zip)
+          if [ ${#zips[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one OBScene-*-mac-universal.zip, got ${#zips[@]}"
+            ls -lah build/ || true
+            exit 1
+          fi
+          zip_path="${zips[0]}"
+          zip_filename="$(basename "$zip_path")"
+          zip_size="$(stat -f%z "$zip_path")"
+
+          # -p prints just the bare signature, which is what we want to
+          # stash as a job output. We pipe the private key in via stdin
+          # using --ed-key-file - so the secret never lands on disk.
+          ed_signature="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" \
+            | Frameworks/bin/sign_update --ed-key-file - -p "$zip_path")"
+
+          if [ -z "$ed_signature" ]; then
+            echo "::error::sign_update produced an empty signature"
+            exit 1
+          fi
+
+          echo "[sign-sparkle] zip: $zip_filename ($zip_size bytes)"
+          echo "[sign-sparkle] ed_signature: ${ed_signature:0:16}…"
+
+          {
+            echo "zip_filename=${zip_filename}"
+            echo "zip_size=${zip_size}"
+            echo "ed_signature=${ed_signature}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -334,6 +393,7 @@ jobs:
         with:
           ref: ${{ needs.compute-version.outputs.checkout_sha }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download built artifacts
         uses: actions/download-artifact@v4
@@ -369,6 +429,68 @@ jobs:
 
       - name: Show assets
         run: ls -lah release-assets
+
+      # Regenerate site/appcast.xml with a new <item> for this release, then
+      # commit it back to main so GitHub Pages picks it up and OBScene
+      # clients start seeing the update. Sparkle fetches this file at
+      # https://ethansk.github.io/OBScene/appcast.xml (SUFeedURL).
+      - name: Update Sparkle appcast
+        id: update-appcast
+        shell: bash
+        env:
+          VERSION: ${{ needs.compute-version.outputs.app_version }}
+          DISPLAY_VERSION: ${{ needs.compute-version.outputs.display_version }}
+          RELEASE_TAG: ${{ needs.compute-version.outputs.release_tag }}
+          ZIP_FILENAME: ${{ needs.build-mac.outputs.sparkle_zip_filename }}
+          ZIP_SIZE: ${{ needs.build-mac.outputs.sparkle_zip_size }}
+          ED_SIGNATURE: ${{ needs.build-mac.outputs.sparkle_ed_signature }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ED_SIGNATURE" ]; then
+            echo "::error::build-mac job did not emit a Sparkle signature"
+            exit 1
+          fi
+
+          # CFBundleVersion build number lives in Info.plist — read it the
+          # same way scripts/bump-version.sh does so the appcast's
+          # sparkle:version stays consistent.
+          build_number="$(python3 -c 'import plistlib; print(plistlib.load(open("OBScene/Info.plist","rb"))["CFBundleVersion"])')"
+          release_notes_url="https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
+
+          BUILD_NUMBER="$build_number" \
+          RELEASE_NOTES_URL="$release_notes_url" \
+          REPO="$REPO" \
+            python3 scripts/update-appcast.py
+
+          echo "[update-appcast] diff:"
+          git --no-pager diff -- site/appcast.xml || true
+
+      - name: Commit appcast update
+        id: commit-appcast
+        shell: bash
+        env:
+          DISPLAY_VERSION: ${{ needs.compute-version.outputs.display_version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add site/appcast.xml
+
+          if git diff --cached --quiet; then
+            echo "[commit-appcast] no changes to commit"
+            exit 0
+          fi
+
+          # `[skip release]` prevents the release workflow from
+          # re-triggering on this bump-back commit (the guard in
+          # bump-version checks the subject line).
+          git commit -m "chore: update appcast for v${DISPLAY_VERSION} [skip release]"
+          # Push back onto the same branch. GITHUB_TOKEN is scoped to this
+          # repo's contents write permission (see `permissions:` above).
+          git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Generate changelog
         id: changelog
@@ -457,6 +579,10 @@ jobs:
             echo "3. Launch from Applications. Look for the \`display.2\` icon in your menu bar."
             echo ""
             echo "Requires macOS 13 Ventura or later and OBS Studio 28+."
+            echo ""
+            echo "### Automatic updates"
+            echo ""
+            echo "Existing installs pick up new releases automatically via Sparkle. Launch OBScene and you'll be prompted to download + install the latest version within a few seconds. Use **Check for Updates…** in the menu-bar dropdown to check on demand."
             echo ""
             echo "### Stable latest-download links"
             echo ""

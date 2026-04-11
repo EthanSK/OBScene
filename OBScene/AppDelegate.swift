@@ -37,6 +37,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         displayMonitor.startMonitoring()
         connectToOBSIfConfigured()
 
+        // Boot Sparkle auto-updater. Reads SUFeedURL / SUPublicEDKey /
+        // SUEnableAutomaticChecks from Info.plist and begins its scheduled
+        // check loop immediately. See OBScene/UpdaterManager.swift and
+        // docs/RELEASING.md for the release-side signing + appcast flow.
+        UpdaterManager.shared.start()
+
         let center = NotificationCenter.default
 
         notificationObservers.append(
@@ -152,9 +158,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            // "rectangle.on.rectangle" reads cleaner in the menu bar than
-            // "display.2" at 16pt — it's closer to a "scene switcher" mark.
-            let image = NSImage(systemSymbolName: "rectangle.on.rectangle",
+            // Ethan prefers the original "two screens" icon — a single,
+            // static `display.2` template. No state-based swapping: the
+            // dropdown menu already shows connection + display status.
+            let image = NSImage(systemSymbolName: "display.2",
                                 accessibilityDescription: "OBScene")
             image?.isTemplate = true
             button.image = image
@@ -207,6 +214,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let aboutItem = NSMenuItem(title: "About OBScene", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
+
+        // "Check for Updates…" drives Sparkle's user-initiated update flow.
+        // Target is UpdaterManager.shared — the selector on that class
+        // calls `SPUStandardUpdaterController.checkForUpdates(_:)`.
+        let checkForUpdatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(UpdaterManager.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdatesItem.target = UpdaterManager.shared
+        menu.addItem(checkForUpdatesItem)
 
         let githubItem = NSMenuItem(title: "OBScene on GitHub", action: #selector(openGitHub), keyEquivalent: "")
         githubItem.target = self
@@ -264,20 +282,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             recordingStatusMenuItem.title = "Trigger actions: \(actions.joined(separator: " + "))"
         }
 
-        // Status-item symbol reflects connection state.
-        if let button = statusItem.button {
-            let symbolName: String
-            if connected && current >= required {
-                symbolName = "rectangle.on.rectangle.circle.fill"
-            } else if connected {
-                symbolName = "rectangle.on.rectangle"
-            } else {
-                symbolName = "rectangle.on.rectangle.slash"
-            }
-            let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "OBScene")
-            image?.isTemplate = true
-            button.image = image
-        }
+        // The status-item symbol is fixed at `display.2` — see setupMenuBar.
+        // Connection / readiness state lives in the dropdown menu items
+        // above, so swapping the icon adds noise without information.
     }
 
     private func truncate(_ s: String, limit: Int) -> String {

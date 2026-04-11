@@ -3,10 +3,11 @@
 OBScene ships downloadable macOS artifacts via:
 
 - [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-- GitHub Releases (universal DMG + ZIP + SHA-256 checksums)
+- GitHub Releases (universal DMG + ZIP + SHA-256 checksums + Sparkle-signed ZIP)
 - The GitHub Pages landing page at <https://ethansk.github.io/OBScene/> (reads `site/version.json`)
+- The Sparkle appcast feed at <https://ethansk.github.io/OBScene/appcast.xml> (reads `site/appcast.xml`)
 
-The workflow mirrors the release flow used by `producer-player`, adapted for a native Swift project.
+The workflow mirrors the release flow used by `producer-player`, adapted for a native Swift project. Producer Player uses `electron-updater`; OBScene uses [Sparkle 2.x](https://sparkle-project.org/) because the app is a native Swift menu bar app rather than Electron. The conceptual flow (check feed URL, verify signature, replace, relaunch) is identical.
 
 ## Version source of truth
 
@@ -101,8 +102,9 @@ Add these repository secrets under **Settings → Secrets and variables → Acti
 | `APPLE_ID` | Apple ID email used for notarisation | — |
 | `APPLE_TEAM_ID` | 10-character Team ID | <https://developer.apple.com/account> → Membership |
 | `APPLE_APP_PASSWORD` | App-specific password for `notarytool` | <https://account.apple.com> → Sign-In and Security → App-Specific Passwords |
+| `SPARKLE_ED_PRIVATE_KEY` | Base64 EdDSA private seed for signing Sparkle updates | `./Frameworks/bin/generate_keys --account obscene-sparkle -x /tmp/key`, then `cat /tmp/key`. Matching public key goes into `OBScene/Info.plist` as `SUPublicEDKey`. |
 
-Once all six are set, the next release run will produce a signed + notarised + stapled DMG and ZIP with no Gatekeeper warning.
+Once all seven are set, the next release run will produce a signed + notarised + stapled DMG and ZIP with no Gatekeeper warning, and a valid Sparkle appcast entry that existing installs can auto-update against.
 
 ### Quick helper — export the cert locally
 
@@ -146,12 +148,13 @@ SIGN_IDENTITY="Developer ID Application: Ethan Sarif-Kattan (T34G959ZG8)" \
 
 ## Workflow files
 
-- [`.github/workflows/release.yml`](../.github/workflows/release.yml) — build, sign, notarise, publish
+- [`.github/workflows/release.yml`](../.github/workflows/release.yml) — build, sign, notarise, publish, sign update, update appcast
 - [`.github/workflows/pages.yml`](../.github/workflows/pages.yml) — landing page deploy (runs `sync-version.sh`)
-- [`scripts/build-app.sh`](../scripts/build-app.sh) — swiftc universal build + codesign
+- [`scripts/build-app.sh`](../scripts/build-app.sh) — swiftc universal build + Sparkle embed + codesign
 - [`scripts/package-release.sh`](../scripts/package-release.sh) — build + zip + DMG + notarise + staple
 - [`scripts/sync-version.sh`](../scripts/sync-version.sh) — Info.plist → site/version.json
 - [`scripts/bump-version.sh`](../scripts/bump-version.sh) — bump Info.plist + sync
+- [`scripts/update-appcast.py`](../scripts/update-appcast.py) — maintain `site/appcast.xml` on each release
 
 ## How this differs from producer-player
 
@@ -162,5 +165,107 @@ Producer Player is an Electron app using `electron-builder` for multi-OS builds.
 - Imports the signing cert into a fresh keychain in CI (electron-builder does this internally)
 - Uses `xcrun notarytool` directly (producer-player goes through electron-builder's `notarize.js` hook)
 - Reads version from `Info.plist` rather than `package.json`
+- Uses **Sparkle 2.x** for auto-updates instead of **electron-updater**
 
 Everything else — the 3-job structure (`compute-version` → `build-mac` → `publish-release`), auto-bumped build tags, changelog generation, stable latest-download aliases, version.json on the landing page — mirrors producer-player's flow.
+
+## Auto-updates (Sparkle)
+
+OBScene ships with Sparkle 2.x vendored under [`Frameworks/Sparkle.framework`](../Frameworks/Sparkle.framework). The build script embeds the framework into `OBScene.app/Contents/Frameworks/`, the app links against it with an `@executable_path/../Frameworks` rpath, and `UpdaterManager` wires up `SPUStandardUpdaterController` on launch.
+
+### Feed URL + schedule
+
+Configured in [`OBScene/Info.plist`](../OBScene/Info.plist):
+
+| Key | Value |
+|---|---|
+| `SUFeedURL` | `https://ethansk.github.io/OBScene/appcast.xml` |
+| `SUPublicEDKey` | the public half of the EdDSA keypair (see below) |
+| `SUEnableAutomaticChecks` | `YES` |
+| `SUScheduledCheckInterval` | `86400` (24 hours) |
+| `SUAutomaticallyUpdate` | `YES` (download in background, prompt to install) |
+
+The app also fires an explicit background check ~9 seconds after launch (mirrors producer-player's `AUTO_UPDATE_CHECK_DELAY_MS`) so users see update prompts quickly on cold start.
+
+### EdDSA signing keypair
+
+Sparkle uses an EdDSA (ed25519) keypair to verify downloads. This is **separate** from the Apple Developer ID cert used for codesigning.
+
+- **Public key** → hard-coded in `Info.plist` under `SUPublicEDKey`.
+- **Private key** → stored as the `SPARKLE_ED_PRIVATE_KEY` GitHub secret.
+
+To rotate the key:
+
+```bash
+# Generate a new keypair in your login keychain.
+./Frameworks/bin/generate_keys --account obscene-sparkle
+
+# Export the private key to a file (base64-encoded ed25519 seed).
+./Frameworks/bin/generate_keys --account obscene-sparkle -x /tmp/obscene-sparkle-private.key
+cat /tmp/obscene-sparkle-private.key
+# → 22ZgWm4...=  (example)
+
+# Paste into GitHub: Settings → Secrets → SPARKLE_ED_PRIVATE_KEY
+gh secret set SPARKLE_ED_PRIVATE_KEY --body "$(cat /tmp/obscene-sparkle-private.key)"
+
+# Update SUPublicEDKey in OBScene/Info.plist with the new public key
+# (generate_keys prints it as a plist snippet when the key is first created).
+```
+
+Don't forget to wipe the old key file (`rm /tmp/obscene-sparkle-private.key`) after pasting.
+
+### Release-side flow
+
+On every push to `main`, the release workflow:
+
+1. Builds `OBScene.app` with `Sparkle.framework` embedded + signed (inside-out, nested XPC services + Updater.app + framework + outer app).
+2. Notarises the app + DMG + ZIP via `xcrun notarytool`.
+3. Runs [`Frameworks/bin/sign_update`](../Frameworks/bin/sign_update) to compute the EdDSA signature of the stapled ZIP, using the private key piped in via stdin from `SPARKLE_ED_PRIVATE_KEY`.
+4. Calls [`scripts/update-appcast.py`](../scripts/update-appcast.py) which prepends a new `<item>` to `site/appcast.xml` with the version, build number, signature, download URL, and release notes link.
+5. Commits the updated `site/appcast.xml` back to `main` with a `[skip release]` subject so the release workflow doesn't re-trigger.
+6. Publishes the GitHub Release with DMG + ZIP + checksums.
+7. Dispatches the Pages workflow so `appcast.xml` + `version.json` are live within a minute or two.
+
+### Vendored Sparkle
+
+The Sparkle framework and its bin tools live under [`Frameworks/`](../Frameworks/) at the repo root:
+
+```
+Frameworks/
+├── Sparkle.framework/         # embedded into OBScene.app/Contents/Frameworks
+└── bin/
+    ├── sign_update            # compute EdDSA signature for a ZIP
+    └── generate_appcast       # not currently used; left for convenience
+```
+
+To upgrade Sparkle, download the latest tarball from <https://github.com/sparkle-project/Sparkle/releases>, extract, and replace `Frameworks/Sparkle.framework` + the `bin/` tools. Then rebuild and verify:
+
+```bash
+./scripts/build-app.sh
+otool -L build/OBScene.app/Contents/MacOS/OBScene | grep Sparkle
+# should print: @rpath/Sparkle.framework/Versions/B/Sparkle ...
+```
+
+### Appcast layout
+
+`site/appcast.xml` is a standard [Sparkle 2 appcast](https://sparkle-project.org/documentation/publishing/). Example item:
+
+```xml
+<item>
+  <title>OBScene v1.6</title>
+  <pubDate>Sat, 11 Apr 2026 20:15:06 +0000</pubDate>
+  <sparkle:version>10600</sparkle:version>
+  <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
+  <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+  <sparkle:releaseNotesLink>https://github.com/EthanSK/OBScene/releases/tag/v1.6</sparkle:releaseNotesLink>
+  <enclosure
+    url="https://github.com/EthanSK/OBScene/releases/download/v1.6/OBScene-1.6.0-mac-universal.zip"
+    length="2908871"
+    type="application/octet-stream"
+    sparkle:version="10600"
+    sparkle:shortVersionString="1.6.0"
+    sparkle:edSignature="EItZSJoFaYNMQizj…" />
+</item>
+```
+
+`update-appcast.py` regenerates the file in place on each release and upserts by `sparkle:shortVersionString`, so re-runs of the same release don't duplicate entries.

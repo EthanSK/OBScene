@@ -155,6 +155,24 @@ class DisplayMonitor {
         triggerWorkItem = nil
     }
 
+    /// Run the full trigger path as if an external display had just reached
+    /// the required count. Used by the Settings "Simulate Display Connection"
+    /// button so the user can dry-run their configuration without replugging.
+    ///
+    /// Unlike real triggers, this:
+    ///   - fires immediately (ignores `config.triggerDelay`)
+    ///   - still respects auto-launch OBS (launches OBS if needed)
+    ///   - still runs scene collection + profile + scene switch + all 4 start
+    ///     actions, with the same inter-action delays as a real trigger
+    ///
+    /// i.e. it's identical to a real trigger, minus the countdown delay.
+    func runTestTrigger() {
+        // Cancel any real pending trigger so the test can't fight with it.
+        cancelPendingTrigger()
+        ActivityLog.shared.log(.info, "Test trigger requested (simulating display connection)")
+        executeTrigger()
+    }
+
     func executeTrigger() {
         triggerWorkItem = nil
 

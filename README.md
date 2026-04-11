@@ -26,6 +26,7 @@ Dock into your battlestation and OBScene takes care of the boring bits: it switc
 - **Native macOS** — pure Swift + SwiftUI menu bar app. No dock icon, no Electron, no background tax.
 - **Launch at Login** — one toggle, backed by `ServiceManagement`.
 - **Persistent configuration** — everything saved locally via `UserDefaults`.
+- **Automatic updates** — Sparkle 2.x checks for new releases on launch and every 24h. Downloads in the background, prompts you to install + relaunch. Use **Check for Updates…** in the menu-bar dropdown to check on demand. All updates are EdDSA-signed and delivered over the GitHub Pages [appcast feed](https://ethansk.github.io/OBScene/appcast.xml).
 
 ## Requirements
 
@@ -43,6 +44,8 @@ Grab the latest signed, notarised build from the [Releases page](https://github.
 - **ZIP**: [OBScene-latest-mac-universal.zip](https://github.com/EthanSK/OBScene/releases/latest/download/OBScene-latest-mac-universal.zip) — for scripted installs.
 
 Both assets are **universal binaries** (Apple Silicon + Intel) built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml) on every push to `main`. Once Developer ID secrets are configured the releases are signed with `Developer ID Application` and notarised by Apple; until then each release is ad-hoc signed and will prompt Gatekeeper on first launch. See [`docs/RELEASING.md`](docs/RELEASING.md) for release setup.
+
+**After the first install, updates are automatic.** OBScene bundles Sparkle 2.x and checks https://ethansk.github.io/OBScene/appcast.xml on every launch plus every 24 hours, downloads new versions in the background, then prompts you to install + relaunch. Disable automatic checks from the "Check for Updates…" dialog if you'd rather update manually.
 
 ### Build from source
 
