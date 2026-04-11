@@ -107,6 +107,11 @@ jobs:
     name: Build macOS (universal)
     needs: compute-version
     runs-on: macos-latest
+    env:
+      # Copy secrets into env so later steps can reference them in `if:` expressions.
+      # GitHub does not allow the `secrets` context inside step-level `if:`,
+      # so we indirect through env vars at the job level.
+      HAS_SIGNING_CERT: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' && 'true' || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -139,7 +144,7 @@ jobs:
 
       - name: Import signing certificate
         id: import-cert
-        if: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' }}
+        if: ${{ env.HAS_SIGNING_CERT == 'true' }}
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
