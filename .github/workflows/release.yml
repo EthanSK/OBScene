@@ -35,10 +35,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          msg="$(git log -1 --pretty=%B)"
-          # We use a custom marker (not [skip ci]) so that the Pages workflow
-          # still re-deploys the landing page after a version bump.
-          if printf '%s' "$msg" | grep -qF '[skip release]'; then
+          # Only look at the FIRST LINE (subject) of the commit message, and
+          # only match the literal bump-back subject. This prevents the guard
+          # from triggering on commit bodies that happen to mention the marker,
+          # e.g. a doc update describing the release flow.
+          subject="$(git log -1 --pretty=%s)"
+          if [[ "$subject" == "chore: bump version to v"*" [skip release]" ]]; then
             echo "already_bumped=true" >> "$GITHUB_OUTPUT"
           else
             echo "already_bumped=false" >> "$GITHUB_OUTPUT"
