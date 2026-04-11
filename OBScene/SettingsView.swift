@@ -351,10 +351,15 @@ struct SettingsView: View {
                     .font(.callout)
                     .fontWeight(.medium)
                 Spacer()
-                Button("Check for Updates…") {
-                    UpdaterManager.shared.checkForUpdates(nil)
-                }
             }
+
+            // Inline status line — mirrors Sparkle's internal state in the
+            // Settings UI so the user can see "up to date" / "update
+            // available: vX.Y" at a glance without digging through a modal.
+            updateStatusLine
+                .font(.caption)
+                .animation(.easeInOut(duration: 0.18), value: updater.isChecking)
+                .animation(.easeInOut(duration: 0.18), value: updater.lastCheckResult)
 
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("Last check:")
@@ -364,6 +369,30 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
             .font(.caption)
+
+            // Split flow: Recheck queries the appcast silently, Download
+            // and Install drives Sparkle's standard install dialog for the
+            // pending update. Download is disabled until a recheck has
+            // detected one — prevents clicking Download in an unknown
+            // state and getting Sparkle's generic "up to date" modal.
+            HStack(spacing: 8) {
+                Button {
+                    UpdaterManager.shared.recheck()
+                } label: {
+                    Text("Recheck")
+                }
+                .disabled(updater.isChecking)
+
+                Button {
+                    UpdaterManager.shared.installPendingUpdate()
+                } label: {
+                    Text("Download and Install")
+                }
+                .disabled(updater.pendingUpdate == nil)
+
+                Spacer()
+            }
+            .animation(.easeInOut(duration: 0.18), value: updater.pendingUpdate != nil)
 
             Divider().padding(.vertical, 2)
 
@@ -391,10 +420,61 @@ struct SettingsView: View {
             }
             .font(.caption)
 
-            Text("OBScene checks for updates daily in the background. Updates are downloaded and installed automatically unless disabled.")
+            Text("Use Recheck to query the feed without downloading. Download and Install becomes available once an update has been detected. The toggles below control background behaviour independently.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatusLine: some View {
+        if updater.isChecking {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+                    .frame(width: 12, height: 12)
+                Text("Checking for updates…")
+                    .foregroundColor(.secondary)
+            }
+        } else if let result = updater.lastCheckResult {
+            switch result {
+            case .upToDate(let currentVersion):
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("You're up to date on v\(currentVersion).")
+                        .foregroundColor(.secondary)
+                }
+            case .updateAvailable(let currentVersion, let latestVersion, let releaseNotesURL):
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundColor(.accentColor)
+                    Text("Update available: v\(latestVersion) (you're on v\(currentVersion)).")
+                        .foregroundColor(.primary)
+                    if let url = releaseNotesURL {
+                        Link("Release notes", destination: url)
+                            .font(.caption)
+                    }
+                }
+            case .failed(let error):
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text("Check failed: \(error)")
+                        .foregroundColor(.red)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
+            }
+        } else {
+            HStack(spacing: 6) {
+                Image(systemName: "circle.dashed")
+                    .foregroundColor(.secondary)
+                Text("Press Recheck to query the update feed.")
+                    .foregroundColor(.secondary)
+            }
         }
     }
 

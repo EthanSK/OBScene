@@ -22,8 +22,15 @@ import Combine
 /// `SettingsView` bind to the Sparkle settings directly — toggles read/write
 /// `automaticallyChecksForUpdates` / `automaticallyDownloadsUpdates` via this
 /// wrapper and the `objectWillChange` publisher keeps the UI in sync.
-final class UpdaterManager: NSObject, ObservableObject {
+final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     static let shared = UpdaterManager()
+
+    /// Result of a manual recheck, surfaced inline in the Settings UI.
+    enum CheckResult: Equatable {
+        case upToDate(currentVersion: String)
+        case updateAvailable(currentVersion: String, latestVersion: String, releaseNotesURL: URL?)
+        case failed(error: String)
+    }
 
     /// Backing Sparkle controller. Created on first access in `start()`.
     /// `startingUpdater: true` means Sparkle will begin checking according to
@@ -33,6 +40,27 @@ final class UpdaterManager: NSObject, ObservableObject {
     /// Has `start()` been called at least once? Used to guard against
     /// double-initialisation.
     private var hasStarted = false
+
+    // MARK: - Published manual-check state
+    //
+    // These properties back the split "Recheck" / "Download and Install"
+    // buttons in the Settings Updates panel. They're only populated by the
+    // user-initiated `recheck()` flow — the background scheduled check loop
+    // still runs through Sparkle's standard user driver and doesn't touch
+    // this state.
+
+    /// Most recent manual recheck outcome. `nil` until the user presses
+    /// "Recheck" for the first time in this session.
+    @Published var lastCheckResult: CheckResult?
+
+    /// True while a manual recheck is in-flight. Drives the inline spinner
+    /// and disables the Recheck button to avoid double-taps.
+    @Published var isChecking: Bool = false
+
+    /// Pending update detected by the most recent manual recheck, if any.
+    /// When non-nil, the "Download and Install" button becomes enabled and
+    /// clicking it hands off to Sparkle's standard install flow.
+    @Published var pendingUpdate: SUAppcastItem?
 
     private override init() {
         super.init()
@@ -80,6 +108,12 @@ final class UpdaterManager: NSObject, ObservableObject {
         return updaterController?.updater.feedURL
     }
 
+    /// Short version string of the running app (matches the value Sparkle
+    /// compares against the appcast). Used when constructing `CheckResult`.
+    private var currentVersionString: String {
+        return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
     /// Boot the Sparkle updater. Safe to call multiple times — subsequent
     /// calls are no-ops. Should be called from
     /// `applicationDidFinishLaunching` on the main thread.
@@ -89,17 +123,14 @@ final class UpdaterManager: NSObject, ObservableObject {
         hasStarted = true
 
         // `startingUpdater: true` tells Sparkle to kick off its scheduled
-        // check loop immediately. `updaterDelegate: nil` uses default
-        // behaviour (respect Info.plist, prompt user on first launch for
-        // opt-in). `userDriverDelegate: nil` uses the standard UI.
-        //
-        // Note: we do NOT pass a custom delegate yet — the defaults match
-        // producer-player's UX closely enough (check on launch, auto
-        // download, prompt to install). If we ever need to customise the
-        // prompt text or the "update available" dialog, add a delegate.
+        // check loop immediately. We pass `self` as the `updaterDelegate`
+        // so manual recheck events route into our `CheckResult` state
+        // machine. The delegate methods are harmless during normal
+        // background scheduled checks — Sparkle will still drive the
+        // standard user-facing UI through `userDriverDelegate: nil`.
         let controller = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: self,
             userDriverDelegate: nil
         )
         self.updaterController = controller
@@ -119,7 +150,7 @@ final class UpdaterManager: NSObject, ObservableObject {
 
     /// Manual "Check for Updates…" menu action. Always shows UI — if there's
     /// no update the user sees an "up to date" dialog, which is the right UX
-    /// for an explicit user-initiated check.
+    /// for an explicit user-initiated check from the menu bar dropdown.
     @objc func checkForUpdates(_ sender: Any?) {
         guard let controller = updaterController else {
             // start() hasn't run yet. Fire it now and then immediately
@@ -135,10 +166,123 @@ final class UpdaterManager: NSObject, ObservableObject {
         controller.checkForUpdates(sender)
     }
 
+    // MARK: - Split recheck / install flow (Settings panel)
+
+    /// Silently query the appcast and populate `lastCheckResult` /
+    /// `pendingUpdate` without starting a download or showing any Sparkle
+    /// UI. Used by the "Recheck" button in the Settings Updates panel.
+    ///
+    /// `checkForUpdateInformation()` is the correct Sparkle API for
+    /// "just tell me if there's an update" — `checkForUpdates(_:)` would
+    /// start the full interactive flow including automatic download
+    /// whenever `SUAutomaticallyUpdate` is YES.
+    func recheck() {
+        assert(Thread.isMainThread, "UpdaterManager.recheck() must be called on main")
+        guard let updater = updaterController?.updater else {
+            // Render subprocess or pre-start() call — surface a placeholder
+            // so the Settings UI has something sensible to show.
+            lastCheckResult = .failed(error: "Updater not initialised")
+            return
+        }
+        guard updater.canCheckForUpdates else {
+            // Sparkle's own "already busy" guard. Don't overwrite the
+            // previous result — just decline the click.
+            return
+        }
+        isChecking = true
+        updater.checkForUpdateInformation()
+    }
+
+    /// Trigger Sparkle's standard install flow for the pending update
+    /// detected by the most recent `recheck()`. Presents the normal
+    /// "Update available" dialog with release notes + Install button.
+    ///
+    /// We use `checkForUpdates(_:)` here rather than trying to drive the
+    /// download ourselves — the standard user driver handles signing
+    /// verification, the install prompt, and the relaunch dance for us.
+    /// Sparkle will notice the appcast entry it just fetched and skip
+    /// straight to the install prompt.
+    func installPendingUpdate() {
+        assert(Thread.isMainThread, "UpdaterManager.installPendingUpdate() must be called on main")
+        guard pendingUpdate != nil, let controller = updaterController else { return }
+        controller.checkForUpdates(nil)
+    }
+
     /// True if Sparkle is currently allowed to show an update prompt. Used to
     /// enable/disable the menu item — we only disable while Sparkle itself
     /// reports it's already busy.
     var canCheckForUpdates: Bool {
         return updaterController?.updater.canCheckForUpdates ?? true
+    }
+
+    // MARK: - SPUUpdaterDelegate
+
+    /// Sparkle found a valid update in the appcast. Capture it so the
+    /// Settings UI can enable the "Download and Install" button and show
+    /// "Update available: vX.Y" inline.
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isChecking = false
+            self.pendingUpdate = item
+            self.lastCheckResult = .updateAvailable(
+                currentVersion: self.currentVersionString,
+                latestVersion: item.displayVersionString,
+                releaseNotesURL: item.releaseNotesURL
+            )
+            self.objectWillChange.send()
+        }
+    }
+
+    /// Sparkle finished checking and there was no newer version available.
+    /// Clear any stale pendingUpdate from a previous check.
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isChecking = false
+            self.pendingUpdate = nil
+            self.lastCheckResult = .upToDate(currentVersion: self.currentVersionString)
+            self.objectWillChange.send()
+        }
+    }
+
+    /// Sparkle tried to download an update and failed (bad signature,
+    /// network error, etc). Surface a user-readable error inline.
+    func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isChecking = false
+            self.lastCheckResult = .failed(error: error.localizedDescription)
+            self.objectWillChange.send()
+        }
+    }
+
+    /// Sparkle aborted the update session (feed unreachable, malformed
+    /// appcast, etc). Same treatment as a download failure — show the
+    /// error inline so the user knows the recheck actually failed rather
+    /// than silently hanging.
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Only treat this as a failed manual recheck if we were
+            // actually mid-check — background scheduled failures shouldn't
+            // clobber a perfectly good `.upToDate` or `.updateAvailable`
+            // state from a prior manual recheck.
+            guard self.isChecking else { return }
+            self.isChecking = false
+            // Sparkle reports "no update found" through this path too
+            // (error code SUNoUpdateError) on some configurations — treat
+            // that as .upToDate, not a failure.
+            let nsError = error as NSError
+            // SUNoUpdateError == 1001 in SUErrors.h — hard-coded here to
+            // dodge the NS_ENUM ↔ Swift bridging awkwardness.
+            if nsError.domain == SUSparkleErrorDomain && nsError.code == 1001 {
+                self.pendingUpdate = nil
+                self.lastCheckResult = .upToDate(currentVersion: self.currentVersionString)
+            } else {
+                self.lastCheckResult = .failed(error: error.localizedDescription)
+            }
+            self.objectWillChange.send()
+        }
     }
 }
