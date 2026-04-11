@@ -1,5 +1,6 @@
 import Cocoa
 import Sparkle
+import Combine
 
 /// Thin wrapper around `SPUStandardUpdaterController` so the rest of the app
 /// talks to a single, lazily-initialised auto-updater. Mirrors the
@@ -16,7 +17,12 @@ import Sparkle
 ///
 /// See Frameworks/Sparkle.framework (vendored) and docs/RELEASING.md for the
 /// release-side signing + appcast generation flow.
-final class UpdaterManager: NSObject {
+///
+/// `ObservableObject` conformance lets the SwiftUI "Updates" panel in
+/// `SettingsView` bind to the Sparkle settings directly — toggles read/write
+/// `automaticallyChecksForUpdates` / `automaticallyDownloadsUpdates` via this
+/// wrapper and the `objectWillChange` publisher keeps the UI in sync.
+final class UpdaterManager: NSObject, ObservableObject {
     static let shared = UpdaterManager()
 
     /// Backing Sparkle controller. Created on first access in `start()`.
@@ -30,6 +36,48 @@ final class UpdaterManager: NSObject {
 
     private override init() {
         super.init()
+    }
+
+    // MARK: - Observable settings (for SwiftUI bindings)
+
+    /// Whether Sparkle should run its scheduled background check loop.
+    /// Bound to the "Automatically check for updates" toggle in Settings.
+    /// Reads/writes `SPUUpdater.automaticallyChecksForUpdates` — Sparkle
+    /// persists the value in `NSUserDefaults` automatically, so toggling
+    /// here survives relaunch without any extra work on our side.
+    var automaticallyChecksForUpdates: Bool {
+        get { updaterController?.updater.automaticallyChecksForUpdates ?? true }
+        set {
+            objectWillChange.send()
+            updaterController?.updater.automaticallyChecksForUpdates = newValue
+        }
+    }
+
+    /// Whether Sparkle should download updates in the background and prompt
+    /// the user to install + relaunch (YES) vs. only notify and wait for the
+    /// user to click "Install Update" (NO). Bound to the "Automatically
+    /// download and install" toggle in Settings.
+    var automaticallyDownloadsUpdates: Bool {
+        get { updaterController?.updater.automaticallyDownloadsUpdates ?? true }
+        set {
+            objectWillChange.send()
+            updaterController?.updater.automaticallyDownloadsUpdates = newValue
+        }
+    }
+
+    /// Timestamp of the last time Sparkle fetched the appcast, or nil if it
+    /// hasn't successfully checked yet in the current install. Displayed as
+    /// "Last check: …" in the Settings Updates panel.
+    var lastUpdateCheckDate: Date? {
+        return updaterController?.updater.lastUpdateCheckDate
+    }
+
+    /// Current Sparkle feed URL. Resolves from Info.plist via Sparkle's own
+    /// lookup so that if we ever change `SUFeedURL` the UI stays in sync
+    /// automatically. Returns nil only in the screenshot-render subprocess
+    /// where `start()` hasn't been called.
+    var feedURL: URL? {
+        return updaterController?.updater.feedURL
     }
 
     /// Boot the Sparkle updater. Safe to call multiple times — subsequent

@@ -7,7 +7,9 @@ Dock into your battlestation and OBScene takes care of the boring bits: it switc
 **🌐 [ethansk.github.io/OBScene](https://ethansk.github.io/OBScene/)** — landing page with feature tour and screenshots.
 
 <div align="center">
-  <img src="Resources/screenshot-settings.png" alt="OBScene settings window" width="600">
+  <img src="Resources/screenshot-menubar.png" alt="OBScene menu bar dropdown" width="260">
+  &nbsp;
+  <img src="Resources/screenshot-settings.png" alt="OBScene settings window" width="520">
 </div>
 
 ![macOS](https://img.shields.io/badge/macOS-13.0%2B-blue)

@@ -29,6 +29,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
 
+        // If OBSCENE_RENDER_MENU=<path> is set, render a SwiftUI facsimile
+        // of the menu-bar dropdown (NSMenu isn't a capturable window, so we
+        // rebuild the same layout as a SwiftUI view and render it to PNG
+        // offscreen). Used by the README + landing page screenshots.
+        if let outputPath = ProcessInfo.processInfo.environment["OBSCENE_RENDER_MENU"] {
+            renderMenuBarDropdownToPNG(path: outputPath)
+            exit(0)
+        }
+
         setupMenuBar()
         // Ask for banner permission up-front so the first trigger fire has a
         // decided answer. Users who deny keep full functionality without
@@ -520,6 +529,62 @@ extension AppDelegate {
             NSLog("[OBScene] Rendered SettingsView to \(path) (\(pixelW)x\(pixelH))")
         } catch {
             NSLog("[OBScene] Failed to write \(path): \(error)")
+        }
+    }
+}
+
+extension AppDelegate {
+    /// Offscreen render of `MenuBarDropdownMockupView` to a PNG, triggered by
+    /// `OBSCENE_RENDER_MENU=<path>`. Used by the README + landing page
+    /// screenshots to show the menu-bar dropdown alongside the settings
+    /// window. NSMenu isn't a capturable window so we can't `screencapture`
+    /// the real dropdown — the SwiftUI facsimile is the cleanest path.
+    fileprivate func renderMenuBarDropdownToPNG(path: String) {
+        let view = MenuBarDropdownMockupView()
+            .fixedSize(horizontal: true, vertical: true)
+
+        let hosting = NSHostingView(rootView: view)
+        // Give it an oversized starting frame then let fittingSize collapse
+        // to the content. Mirrors `renderSettingsToPNG`.
+        hosting.frame = NSRect(x: 0, y: 0, width: 600, height: 1200)
+        hosting.layoutSubtreeIfNeeded()
+        let fitting = hosting.fittingSize
+        hosting.frame = NSRect(origin: .zero, size: fitting)
+        hosting.layoutSubtreeIfNeeded()
+
+        let scale: CGFloat = 2.0
+        let pixelW = Int(fitting.width * scale)
+        let pixelH = Int(fitting.height * scale)
+
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelW,
+            pixelsHigh: pixelH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 32
+        ) else {
+            NSLog("[OBScene] Failed to create menu bitmap rep")
+            return
+        }
+        bitmap.size = fitting
+
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            NSLog("[OBScene] Failed to encode menu PNG")
+            return
+        }
+
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            NSLog("[OBScene] Rendered menu bar dropdown to \(path) (\(pixelW)x\(pixelH))")
+        } catch {
+            NSLog("[OBScene] Failed to write menu PNG \(path): \(error)")
         }
     }
 }

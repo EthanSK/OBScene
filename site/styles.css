@@ -224,6 +224,15 @@ nav {
 .screenshot-wrap {
   padding: 40px 24px 60px;
 }
+.screenshot-pair {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 28px;
+  max-width: 940px;
+  margin: 0 auto;
+  flex-wrap: wrap;
+}
 .screenshot {
   position: relative;
   max-width: 620px;
@@ -240,6 +249,26 @@ nav {
 .screenshot img {
   width: 100%;
   display: block;
+}
+.screenshot--menu {
+  flex: 0 0 auto;
+  width: 240px;
+  max-width: 240px;
+  margin: 0;
+}
+.screenshot--settings {
+  flex: 1 1 auto;
+  max-width: 560px;
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .screenshot-pair {
+    gap: 20px;
+  }
+  .screenshot--menu {
+    width: 200px;
+    max-width: 200px;
+  }
 }
 
 /* ── Sections ── */

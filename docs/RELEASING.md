@@ -156,6 +156,24 @@ SIGN_IDENTITY="Developer ID Application: Ethan Sarif-Kattan (T34G959ZG8)" \
 - [`scripts/bump-version.sh`](../scripts/bump-version.sh) — bump Info.plist + sync
 - [`scripts/update-appcast.py`](../scripts/update-appcast.py) — maintain `site/appcast.xml` on each release
 
+## Trigger sequencing
+
+The "Simulate Display Connection" button and real display-trigger events both run through `DisplayMonitor.runTriggerActions()`. That function fires up to four OBS WebSocket requests in order — `SetCurrentSceneCollection`, `SetCurrentProfile`, `SetCurrentProgramScene`, then whichever of `StartRecord` / `StartStream` / `StartVirtualCam` / `StartReplayBuffer` the user enabled.
+
+These are **not** independent. OBS applies scene collection and profile switches asynchronously on its side — `SetCurrentSceneCollection` reloads the entire scene list in the background, and setting a scene from the new collection immediately afterwards can silently fail because the new scene names haven't been indexed yet. Likewise, `StartRecord` issued before the profile switch has applied will use the old output path / encoder settings.
+
+To avoid these races we sequence the steps with small fixed delays, defined as private constants near the top of `DisplayMonitor.swift`:
+
+| Gap | Default | Purpose |
+|---|---|---|
+| `collectionToProfileDelay` | 500 ms | Let OBS finish reloading the scene list after switching scene collection before we switch profile. |
+| `profileToSceneDelay` | 500 ms | Let the new profile's encoder/output settings apply before switching the active scene. |
+| `sceneToActionsDelay` | 250 ms | Let the program scene settle before firing Start actions. |
+
+The four start actions are fired in parallel — they don't interfere with each other.
+
+If users report `SetCurrentProgramScene` silently failing or `StartRecord` using the wrong output settings, bump `collectionToProfileDelay` first (it guards the slowest OBS reload). There is no UI for these — they're intentionally hard-coded so that reliability doesn't depend on user configuration.
+
 ## How this differs from producer-player
 
 Producer Player is an Electron app using `electron-builder` for multi-OS builds. OBScene is a native Swift menu bar app, so it:

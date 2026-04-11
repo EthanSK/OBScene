@@ -5,6 +5,7 @@ struct SettingsView: View {
     @EnvironmentObject var configStore: ConfigStore
     @EnvironmentObject var obsManager: OBSWebSocketManager
     @ObservedObject private var activityLog = ActivityLog.shared
+    @ObservedObject private var updater = UpdaterManager.shared
 
     @State private var obsHost: String = ""
     @State private var obsPort: String = ""
@@ -244,6 +245,15 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                // Updates — Sparkle auto-update controls. Placed between
+                // Testing and Activity so it's visible without interrupting
+                // the main trigger-configuration flow above.
+                GroupBox(label: Label("Updates", systemImage: "arrow.down.circle")) {
+                    updatesSection
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 // Activity
                 GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -326,6 +336,81 @@ struct SettingsView: View {
                 launchAtLogin = SMAppService.mainApp.status == .enabled
             }
         }
+    }
+
+    private var updatesSection: some View {
+        // Pull the bundle's short version string — this matches the value
+        // Sparkle compares against the appcast and the one shown on the
+        // landing page / GitHub release page.
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let feedURLString = updater.feedURL?.absoluteString ?? "https://ethansk.github.io/OBScene/appcast.xml"
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("OBScene v\(version)")
+                    .font(.callout)
+                    .fontWeight(.medium)
+                Spacer()
+                Button("Check for Updates…") {
+                    UpdaterManager.shared.checkForUpdates(nil)
+                }
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("Last check:")
+                    .foregroundColor(.secondary)
+                Text(formattedLastCheck)
+                    .monospacedDigit()
+                    .foregroundColor(.secondary)
+            }
+            .font(.caption)
+
+            Divider().padding(.vertical, 2)
+
+            // Binding<Bool> wrappers onto the UpdaterManager properties so
+            // SwiftUI drives Sparkle directly without us caching state here.
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { updater.automaticallyChecksForUpdates },
+                set: { updater.automaticallyChecksForUpdates = $0 }
+            ))
+            Toggle("Automatically download and install updates", isOn: Binding(
+                get: { updater.automaticallyDownloadsUpdates },
+                set: { updater.automaticallyDownloadsUpdates = $0 }
+            ))
+            .disabled(!updater.automaticallyChecksForUpdates)
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("Feed:")
+                    .foregroundColor(.secondary)
+                Text(feedURLString)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            .font(.caption)
+
+            Text("OBScene checks for updates daily in the background. Updates are downloaded and installed automatically unless disabled.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var formattedLastCheck: String {
+        // Screenshot-render subprocess never boots Sparkle, so surface a
+        // plausible placeholder instead of "Never" — otherwise the captured
+        // PNG shows an empty "Last check" row which looks broken.
+        if ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil {
+            return "Today, checked in the background"
+        }
+        guard let date = updater.lastUpdateCheckDate else {
+            return "Never"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var welcomeBanner: some View {

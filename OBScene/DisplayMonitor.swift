@@ -247,6 +247,33 @@ class DisplayMonitor {
         )
     }
 
+    // MARK: - Trigger step delays
+    //
+    // Empirically OBS has well-known race conditions when you fire
+    // `SetCurrentSceneCollection`, `SetCurrentProfile`, `SetCurrentProgramScene`,
+    // and `StartRecord` at once over the WebSocket:
+    //
+    //   * `SetCurrentSceneCollection` reloads OBS's entire scene list
+    //     asynchronously on OBS's side. Immediately issuing a
+    //     `SetCurrentProgramScene` for a scene defined in the new collection
+    //     can silently fail because the new scenes haven't been indexed yet.
+    //   * Profile switches re-read recording/encoder settings. `StartRecord`
+    //     fired before the profile has applied can use the old output path /
+    //     encoder settings.
+    //
+    // OBS doesn't expose synchronous confirmation over the WebSocket v5
+    // request/response channel for scene collection + profile switches
+    // (the collection-changed event comes later), so we sequence the steps
+    // with small fixed delays instead. Keeping them as named constants so
+    // the next person to tweak them knows exactly what each gap guards.
+    //
+    // If reliability regresses on slower machines, bump these — especially
+    // `collectionToProfileDelay`, which guards the slowest OBS reload step.
+    // See also docs/RELEASING.md "Trigger sequencing" for the rationale.
+    private static let collectionToProfileDelay: TimeInterval = 0.5  // 500ms
+    private static let profileToSceneDelay:      TimeInterval = 0.5  // 500ms
+    private static let sceneToActionsDelay:      TimeInterval = 0.25 // 250ms
+
     private func runTriggerActions() {
         let config = ConfigStore.shared.config
         let obs = OBSWebSocketManager.shared
@@ -256,50 +283,68 @@ class DisplayMonitor {
 
         NotificationCenter.default.post(name: .displayTriggerFired, object: nil)
 
-        // Switch scene collection if configured
-        if !config.selectedSceneCollection.isEmpty {
+        // Build the step pipeline as an ordered sequence. Each step runs on
+        // the main queue and schedules the next with the configured delay,
+        // so delays compose naturally and we never fire a later step before
+        // the earlier one has at least been issued. Skipped steps fall
+        // through immediately (no delay) — we only pay latency for steps the
+        // user actually enabled.
+        //
+        // (We use asyncAfter from .now() at each hop rather than pre-computing
+        // absolute deadlines so that a slow main queue doesn't compress the
+        // gaps between steps — the gap is always "500ms after the previous
+        // request was posted", regardless of scheduling jitter.)
+
+        func runSceneCollection(then next: @escaping () -> Void) {
+            if config.selectedSceneCollection.isEmpty {
+                next()
+                return
+            }
             obs.setSceneCollection(config.selectedSceneCollection)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.collectionToProfileDelay,
+                execute: next
+            )
         }
 
-        // Switch profile if configured (delay slightly to let collection switch complete)
-        if !config.selectedProfile.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                obs.setProfile(config.selectedProfile)
+        func runProfile(then next: @escaping () -> Void) {
+            if config.selectedProfile.isEmpty {
+                next()
+                return
             }
+            obs.setProfile(config.selectedProfile)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.profileToSceneDelay,
+                execute: next
+            )
         }
 
-        // Switch scene if configured
-        if !config.selectedScene.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                obs.setScene(config.selectedScene)
+        func runScene(then next: @escaping () -> Void) {
+            if config.selectedScene.isEmpty {
+                next()
+                return
             }
+            obs.setScene(config.selectedScene)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.sceneToActionsDelay,
+                execute: next
+            )
         }
 
-        // Start recording if enabled
-        if config.startRecording {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                obs.startRecording()
-            }
+        func runStartActions() {
+            // These four are independent — no ordering constraint between
+            // them, so fire in parallel.
+            if config.startRecording    { obs.startRecording()    }
+            if config.startStreaming    { obs.startStreaming()    }
+            if config.startVirtualCam   { obs.startVirtualCam()   }
+            if config.startReplayBuffer { obs.startReplayBuffer() }
         }
 
-        // Start streaming if enabled
-        if config.startStreaming {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                obs.startStreaming()
-            }
-        }
-
-        // Start virtual camera if enabled
-        if config.startVirtualCam {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                obs.startVirtualCam()
-            }
-        }
-
-        // Start replay buffer if enabled
-        if config.startReplayBuffer {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                obs.startReplayBuffer()
+        runSceneCollection {
+            runProfile {
+                runScene {
+                    runStartActions()
+                }
             }
         }
     }
