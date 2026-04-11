@@ -24,7 +24,26 @@ if [ ! -f "$PLIST" ]; then
   exit 1
 fi
 
-version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true)"
+# Read CFBundleShortVersionString. PlistBuddy is macOS-only; on Linux
+# (CI runners for version compute / pages deploy) fall back to Python's
+# plistlib which is always available.
+read_plist_key() {
+  local key="$1"
+  if [ -x /usr/libexec/PlistBuddy ]; then
+    /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" 2>/dev/null || true
+  elif command -v plutil >/dev/null 2>&1; then
+    plutil -extract "$key" raw "$PLIST" 2>/dev/null || true
+  else
+    python3 - "$PLIST" "$key" <<'PY' 2>/dev/null || true
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    data = plistlib.load(f)
+print(data.get(sys.argv[2], ''))
+PY
+  fi
+}
+
+version="$(read_plist_key CFBundleShortVersionString)"
 
 if [ -z "$version" ]; then
   echo "[version:sync] error: CFBundleShortVersionString is empty or missing in Info.plist" >&2
