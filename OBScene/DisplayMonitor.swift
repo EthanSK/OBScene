@@ -94,6 +94,9 @@ class DisplayMonitor {
         // "displays unplugged" trigger so listeners can stop recording/streaming.
         if externalDisplayCount < requiredDisplays && previousCount >= requiredDisplays {
             cancelPendingTrigger()
+            // Also abort any in-flight OBS auto-launch wait — the trigger is
+            // no longer going to fire, so polling the socket is pointless.
+            OBSWebSocketManager.shared.cancelInflightEnsureConnected()
             ActivityLog.shared.log(.info, "Pending trigger cancelled")
             executeUnplugTrigger()
         }
@@ -123,6 +126,28 @@ class DisplayMonitor {
 
         print("[OBScene] Display trigger scheduled in \(delay) seconds")
         ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in \(delay)s")
+
+        // Kick off OBS auto-launch + WebSocket warm-up in parallel with the
+        // countdown so that by the time the delay elapses, OBS is hopefully
+        // already up and connected. Net plug-in-to-recording time stays close
+        // to `delay` seconds even when OBS is cold.
+        let obs = OBSWebSocketManager.shared
+        let config = ConfigStore.shared.config
+        if !obs.isConnected && config.hasBeenConfigured && !config.obsHost.isEmpty {
+            _ = obs.ensureConnected(
+                host: config.obsHost,
+                port: config.obsPort,
+                password: config.obsPassword,
+                autoLaunch: config.autoLaunchOBS,
+                timeoutSeconds: config.obsLaunchTimeoutSeconds,
+                onReady: { _ in
+                    // The result is consumed by executeTrigger — it'll run
+                    // ensureConnected again when the delay fires and either
+                    // get `.connected` immediately or block until the shared
+                    // wait finishes. We don't need to do anything here.
+                }
+            )
+        }
     }
 
     private func cancelPendingTrigger() {
@@ -136,11 +161,77 @@ class DisplayMonitor {
         let config = ConfigStore.shared.config
         let obs = OBSWebSocketManager.shared
 
-        guard obs.isConnected else {
-            print("[OBScene] Trigger fired but OBS is not connected")
-            ActivityLog.shared.log(.info, "Trigger fired, but OBS not connected")
+        // Fast path: already connected, fire immediately.
+        if obs.isConnected {
+            runTriggerActions()
             return
         }
+
+        // Not connected. Try to auto-launch OBS (or just reconnect to an
+        // already-running OBS) and fire when the WebSocket is up.
+        guard config.hasBeenConfigured, !config.obsHost.isEmpty else {
+            print("[OBScene] Trigger fired but OBS connection is not configured")
+            ActivityLog.shared.log(.info, "Trigger fired, but OBS not configured")
+            return
+        }
+
+        // Pick a timeout. If OBS is already running we only need enough time
+        // for the WebSocket handshake to complete (OBS usually binds the
+        // socket within a second of startup, but we give it some slack). If
+        // OBS is cold we respect the full user-configured launch timeout.
+        //
+        // Note: scheduleTrigger may already have kicked off a parallel
+        // ensureConnected during the delay countdown — in that case this
+        // call supersedes it but inherits the launched OBS process, so the
+        // shorter timeout is usually fine.
+        let obsAlreadyRunning = obs.isOBSRunning()
+        let timeout = obsAlreadyRunning ? 10 : config.obsLaunchTimeoutSeconds
+
+        print("[OBScene] Trigger fired, waiting for OBS WebSocket (timeout: \(timeout)s)")
+        ActivityLog.shared.log(.info, "Waiting for OBS WebSocket (\(timeout)s)")
+
+        _ = obs.ensureConnected(
+            host: config.obsHost,
+            port: config.obsPort,
+            password: config.obsPassword,
+            autoLaunch: config.autoLaunchOBS,
+            timeoutSeconds: timeout,
+            onReady: { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .connected:
+                    self.runTriggerActions()
+                case .cancelled:
+                    print("[OBScene] Auto-launch cancelled (displays unplugged mid-wait)")
+                case .obsNotInstalled:
+                    print("[OBScene] OBS is not installed")
+                    ActivityLog.shared.log(.info, "OBS is not installed")
+                    UserNotifier.post(
+                        title: "OBScene: OBS not installed",
+                        body: "OBS Studio isn't installed on this Mac. Download it from obsproject.com/download."
+                    )
+                case .autoLaunchDisabled:
+                    print("[OBScene] Trigger fired but OBS is not running and auto-launch is disabled")
+                    ActivityLog.shared.log(.info, "OBS not running and auto-launch disabled")
+                    UserNotifier.post(
+                        title: "OBScene: OBS not running",
+                        body: "Enable auto-launch in Settings or start OBS manually."
+                    )
+                case .websocketUnavailable:
+                    print("[OBScene] OBS is up but WebSocket didn't become available in time")
+                    ActivityLog.shared.log(.info, "OBS WebSocket did not respond in time")
+                    UserNotifier.post(
+                        title: "OBScene: couldn't connect to OBS",
+                        body: "OBS is running but its WebSocket server didn't respond. Enable it in Tools → WebSocket Server Settings."
+                    )
+                }
+            }
+        )
+    }
+
+    private func runTriggerActions() {
+        let config = ConfigStore.shared.config
+        let obs = OBSWebSocketManager.shared
 
         print("[OBScene] Display trigger fired! Executing OBS actions...")
         ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions")

@@ -144,6 +144,17 @@ OBScene registers a `CGDisplayRegisterReconfigurationCallback` to receive real-t
 
 Commands reach OBS over the WebSocket v5 protocol, with SHA-256 challenge-response authentication if you've set a password.
 
+### Auto-launching OBS
+
+If OBS isn't running when a trigger fires, OBScene will launch it for you (this is enabled by default — turn it off in **Settings → General** if you'd rather manage OBS yourself). The launch happens in parallel with the trigger delay countdown, so on a 5s delay and a cold OBS start the total plug-in-to-recording time is usually close to the delay rather than delay + launch time.
+
+- If OBS is installed but not running: OBScene launches it and polls the WebSocket port until it comes up, then fires the trigger actions.
+- If OBS is already running but the WebSocket is disconnected: OBScene just reconnects (shorter timeout).
+- If the WebSocket server is disabled inside OBS (**Tools → WebSocket Server Settings**): OBScene posts a notification telling you to enable it.
+- If OBS Studio isn't installed: OBScene posts a notification pointing at [obsproject.com/download](https://obsproject.com/download).
+- If you unplug the displays during the wait, the launch attempt is cancelled along with the pending trigger.
+- Unplug-to-stop never auto-launches OBS — if OBS isn't running there's nothing to stop.
+
 ## Configuration reference
 
 All settings are persisted locally in `UserDefaults` under the key `OBSceneConfig`.
@@ -151,6 +162,8 @@ All settings are persisted locally in `UserDefaults` under the key `OBSceneConfi
 | Setting | Description | Default |
 | --- | --- | --- |
 | **Launch at Login** | Start OBScene automatically on login via `SMAppService`. | off |
+| **Auto-launch OBS if not running** | When a trigger fires and OBS isn't running, launch OBS Studio and wait for its WebSocket server before sending commands. | on |
+| **Wait up to N seconds for OBS to be ready** | Timeout for the WebSocket handshake when auto-launching OBS. | `30` |
 | **Host** | OBS WebSocket host. | `localhost` |
 | **Port** | OBS WebSocket port. | `4455` |
 | **Password** | OBS WebSocket password (optional). | *(empty)* |

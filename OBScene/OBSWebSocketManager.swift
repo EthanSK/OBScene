@@ -1,5 +1,6 @@
 import Foundation
 import CommonCrypto
+import AppKit
 
 // MARK: - OBS WebSocket v5 Protocol Messages
 
@@ -505,5 +506,224 @@ class OBSWebSocketManager: ObservableObject {
 
     func stopReplayBuffer() {
         sendRequest("StopReplayBuffer")
+    }
+
+    // MARK: - OBS process detection + launch
+
+    /// Bundle identifier used by OBS Studio on macOS.
+    static let obsBundleIdentifier = "com.obsproject.obs-studio"
+
+    /// Returns true if an OBS Studio process is currently running.
+    func isOBSRunning() -> Bool {
+        return NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+        }
+    }
+
+    /// Returns the filesystem URL of the installed OBS Studio app, or nil if
+    /// OBS is not installed on this machine.
+    func obsApplicationURL() -> URL? {
+        return NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: OBSWebSocketManager.obsBundleIdentifier
+        )
+    }
+
+    /// Launch OBS Studio if it's installed. Returns false when OBS isn't
+    /// installed on this machine.
+    @discardableResult
+    func launchOBS() -> Bool {
+        guard let url = obsApplicationURL() else { return false }
+
+        // Launch OBS headlessly (no Dock bounce, don't steal focus) so the
+        // user isn't yanked out of whatever they were doing when they plugged
+        // in a display.
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        config.addsToRecentItems = false
+        config.hides = false
+
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            if let error = error {
+                print("[OBScene] Failed to launch OBS: \(error)")
+            }
+        }
+        return true
+    }
+
+    // MARK: - Ensure-connected flow (for auto-launch)
+
+    /// Result of attempting to make sure the WebSocket is connected before a
+    /// trigger fires its OBS commands.
+    enum EnsureConnectedResult {
+        /// Already connected, or became connected within the timeout.
+        case connected
+        /// OBS isn't installed (no app bundle with `com.obsproject.obs-studio`).
+        case obsNotInstalled
+        /// OBS process is running but the WebSocket server never became
+        /// available within the timeout — usually because the user hasn't
+        /// enabled Tools → WebSocket Server Settings.
+        case websocketUnavailable
+        /// User has auto-launch disabled and OBS isn't running / connected.
+        case autoLaunchDisabled
+        /// The attempt was cancelled (e.g. displays disconnected mid-launch).
+        case cancelled
+    }
+
+    /// A cancellable handle for an in-flight `ensureConnected` attempt.
+    final class EnsureConnectedHandle {
+        fileprivate var cancelled = false
+        func cancel() { cancelled = true }
+    }
+
+    /// The single in-flight ensure-connected attempt. Only one of these runs
+    /// at a time so we don't spawn two launch attempts if the user unplugs
+    /// and replugs during startup.
+    private var inflightEnsureHandle: EnsureConnectedHandle?
+    private let ensureLock = NSLock()
+
+    /// Make sure the WebSocket is connected before invoking `onReady`.
+    ///
+    /// If already connected, `onReady` runs immediately. Otherwise:
+    ///   - If OBS isn't running and auto-launch is enabled, launch it.
+    ///   - Poll (every 500ms) up to `timeoutSeconds` for the WebSocket to
+    ///     accept a connection.
+    ///   - Call `onReady` with the result on the main queue.
+    ///
+    /// `host`, `port`, `password` come from the caller so we don't touch
+    /// ConfigStore from here (keeps this method testable and side-effect free
+    /// apart from the launch + connect calls).
+    ///
+    /// Returns a handle that can be cancelled if the trigger becomes moot
+    /// (e.g. displays disconnected during the wait).
+    @discardableResult
+    func ensureConnected(
+        host: String,
+        port: Int,
+        password: String,
+        autoLaunch: Bool,
+        timeoutSeconds: Int,
+        onReady: @escaping (EnsureConnectedResult) -> Void
+    ) -> EnsureConnectedHandle {
+        // Coalesce: if one is already running, cancel it and replace. This
+        // prevents double-launches when the user unplugs + replugs during the
+        // wait window.
+        ensureLock.lock()
+        inflightEnsureHandle?.cancelled = true
+        let handle = EnsureConnectedHandle()
+        inflightEnsureHandle = handle
+        ensureLock.unlock()
+
+        // Fast path: already connected.
+        if isConnected {
+            DispatchQueue.main.async { onReady(.connected) }
+            return handle
+        }
+
+        let running = isOBSRunning()
+
+        if !running {
+            guard autoLaunch else {
+                DispatchQueue.main.async { onReady(.autoLaunchDisabled) }
+                return handle
+            }
+            guard obsApplicationURL() != nil else {
+                DispatchQueue.main.async { onReady(.obsNotInstalled) }
+                return handle
+            }
+            print("[OBScene] OBS not running — launching…")
+            ActivityLog.shared.log(.info, "OBS not running — launching")
+            _ = launchOBS()
+        } else {
+            print("[OBScene] OBS running but not connected — attempting to reconnect")
+            ActivityLog.shared.log(.info, "OBS running — reconnecting WebSocket")
+        }
+
+        // Kick off (or restart) the connection attempt.
+        connect(host: host, port: port, password: password)
+
+        pollForConnection(
+            handle: handle,
+            host: host,
+            port: port,
+            password: password,
+            deadline: Date().addingTimeInterval(TimeInterval(max(timeoutSeconds, 1))),
+            reconnectEvery: 3.0,
+            lastReconnectAt: Date(),
+            onReady: onReady
+        )
+
+        return handle
+    }
+
+    /// Poll the `isConnected` flag every 500ms until the deadline. We also
+    /// re-issue `connect()` every `reconnectEvery` seconds so that once OBS
+    /// finishes starting up and binds the WebSocket port, we'll actually
+    /// notice — the first `connect()` call issued while OBS was still booting
+    /// may have errored out immediately and left us in a terminal state.
+    private func pollForConnection(
+        handle: EnsureConnectedHandle,
+        host: String,
+        port: Int,
+        password: String,
+        deadline: Date,
+        reconnectEvery: TimeInterval,
+        lastReconnectAt: Date,
+        onReady: @escaping (EnsureConnectedResult) -> Void
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+
+            if handle.cancelled {
+                onReady(.cancelled)
+                return
+            }
+
+            if self.isConnected {
+                onReady(.connected)
+                return
+            }
+
+            if Date() >= deadline {
+                // Distinguish "OBS never came up" from "OBS is up but WS is
+                // disabled" — both look the same from our side (no handshake),
+                // but if the process is running we can give a more useful
+                // error.
+                if self.isOBSRunning() {
+                    onReady(.websocketUnavailable)
+                } else {
+                    onReady(.websocketUnavailable)
+                }
+                return
+            }
+
+            // Re-attempt connect periodically so we survive the first few
+            // failed sockets while OBS is still booting.
+            var nextLastReconnect = lastReconnectAt
+            if Date().timeIntervalSince(lastReconnectAt) >= reconnectEvery {
+                self.connect(host: host, port: port, password: password)
+                nextLastReconnect = Date()
+            }
+
+            self.pollForConnection(
+                handle: handle,
+                host: host,
+                port: port,
+                password: password,
+                deadline: deadline,
+                reconnectEvery: reconnectEvery,
+                lastReconnectAt: nextLastReconnect,
+                onReady: onReady
+            )
+        }
+    }
+
+    /// Cancel any in-flight ensure-connected attempt. Called when the user
+    /// unplugs mid-wait so we don't keep polling for a trigger that's been
+    /// cancelled.
+    func cancelInflightEnsureConnected() {
+        ensureLock.lock()
+        inflightEnsureHandle?.cancelled = true
+        inflightEnsureHandle = nil
+        ensureLock.unlock()
     }
 }

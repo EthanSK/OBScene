@@ -107,6 +107,8 @@ struct AppConfig: Codable, Equatable {
     var triggerDelay: Int = 5
     var requiredExternalDisplays: Int = 1
     var hasBeenConfigured: Bool = false
+    var autoLaunchOBS: Bool = true
+    var obsLaunchTimeoutSeconds: Int = 30
 
     init() {}
 
@@ -132,6 +134,8 @@ struct AppConfig: Codable, Equatable {
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
         requiredExternalDisplays = try container.decodeIfPresent(Int.self, forKey: .requiredExternalDisplays) ?? requiredExternalDisplays
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
+        autoLaunchOBS = try container.decodeIfPresent(Bool.self, forKey: .autoLaunchOBS) ?? autoLaunchOBS
+        obsLaunchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .obsLaunchTimeoutSeconds) ?? obsLaunchTimeoutSeconds
     }
 }
 

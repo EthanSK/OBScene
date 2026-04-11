@@ -39,6 +39,27 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
+
+                        Divider().padding(.vertical, 2)
+
+                        Toggle("Auto-launch OBS if not running",
+                               isOn: $configStore.config.autoLaunchOBS)
+                        Text("When a trigger fires and OBS isn't running, OBScene will start OBS Studio and wait for its WebSocket server.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack {
+                            Text("Wait up to")
+                            Stepper(value: $configStore.config.obsLaunchTimeoutSeconds,
+                                    in: 5...120, step: 5) {
+                                Text("\(configStore.config.obsLaunchTimeoutSeconds) seconds")
+                                    .monospacedDigit()
+                            }
+                            Text("for OBS to be ready")
+                                .foregroundColor(.secondary)
+                        }
+                        .disabled(!configStore.config.autoLaunchOBS)
                     }
                     .padding(.vertical, 4)
                 }
