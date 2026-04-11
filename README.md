@@ -4,6 +4,8 @@
 
 Dock into your battlestation and OBScene takes care of the boring bits: it switches your scene collection, profile, and active scene, then (optionally) starts recording, streaming, the virtual camera, or the replay buffer. Unplug and it can stop everything just as cleanly. All hands-free, all local.
 
+**🌐 [ethansk.github.io/OBScene](https://ethansk.github.io/OBScene/)** — landing page with feature tour and screenshots.
+
 <div align="center">
   <img src="Resources/screenshot-settings.png" alt="OBScene settings window" width="600">
 </div>
