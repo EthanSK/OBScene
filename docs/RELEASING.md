@@ -54,8 +54,8 @@ The landing page's Download button reads these from `site/version.json`.
 
 | Trigger | Result |
 |---|---|
-| Push to `main`/`master` | Workflow auto-bumps the minor version, commits it back with `[skip ci]`, publishes `v<major>.<minor>` tag and release |
-| Push commit containing `[skip ci]` or `chore: bump version` | Workflow short-circuits (no build, no publish) — this is how the bump-back loop is prevented |
+| Push to `main`/`master` | Workflow auto-bumps the minor version, commits it back with `[skip release]`, publishes `v<major>.<minor>` tag and release |
+| Push commit containing `[skip release]` | Release workflow short-circuits (no build, no publish) — this is how the bump-back loop is prevented. The Pages workflow still runs, so the landing page updates to the new version. |
 | Push tag `v*` | Builds and publishes that tag (must match `Info.plist` display version) |
 | `workflow_dispatch` | Uses whatever version is already in `Info.plist`; does not bump |
 
@@ -71,7 +71,7 @@ git push origin main
 The workflow will:
 
 - Run `./scripts/bump-version.sh minor` (e.g. `1.2.0 -> 1.3.0`, display `v1.3`)
-- Commit the bump to `main` with `chore: bump version to v1.3 [skip ci]`
+- Commit the bump to `main` with `chore: bump version to v1.3 [skip release]`
 - Build a universal `.app` with `swiftc` (arm64 + x86_64 via `lipo`)
 - Sign with Developer ID (or ad-hoc fall-back)
 - Notarise + staple via `notarytool` (if Apple credentials are configured)

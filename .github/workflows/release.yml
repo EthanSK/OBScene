@@ -36,7 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           msg="$(git log -1 --pretty=%B)"
-          if printf '%s' "$msg" | grep -qE '\[skip ci\]|\[skip actions\]|chore: bump version'; then
+          # We use a custom marker (not [skip ci]) so that the Pages workflow
+          # still re-deploys the landing page after a version bump.
+          if printf '%s' "$msg" | grep -qF '[skip release]'; then
             echo "already_bumped=true" >> "$GITHUB_OUTPUT"
           else
             echo "already_bumped=false" >> "$GITHUB_OUTPUT"
@@ -80,7 +82,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: bump version to v${DISPLAY_VERSION} [skip ci]"
+          git commit -m "chore: bump version to v${DISPLAY_VERSION} [skip release]"
           git push origin HEAD:${GITHUB_REF_NAME}
 
           new_sha="$(git rev-parse HEAD)"
