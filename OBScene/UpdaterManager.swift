@@ -58,9 +58,19 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published var isChecking: Bool = false
 
     /// Pending update detected by the most recent manual recheck, if any.
-    /// When non-nil, the "Download and Install" button becomes enabled and
-    /// clicking it hands off to Sparkle's standard install flow.
+    /// When non-nil, the "Install & Restart" button becomes enabled and
+    /// clicking it hands off to Sparkle's standard install flow. Note that
+    /// once a pending update is known we immediately trigger Sparkle's
+    /// standard download+install flow in `didFindValidUpdate` — the button
+    /// is really just a way to re-open Sparkle's dialog if the user
+    /// dismissed it.
     @Published var pendingUpdate: SUAppcastItem?
+
+    /// True once the user has initiated a recheck. Used so that we only
+    /// auto-trigger the download-and-install handoff for user-initiated
+    /// rechecks, not for background scheduled Sparkle checks (which already
+    /// have their own download+install UI flow).
+    private var recheckIsUserInitiated: Bool = false
 
     private override init() {
         super.init()
@@ -190,18 +200,17 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
             return
         }
         isChecking = true
+        recheckIsUserInitiated = true
         updater.checkForUpdateInformation()
     }
 
-    /// Trigger Sparkle's standard install flow for the pending update
-    /// detected by the most recent `recheck()`. Presents the normal
-    /// "Update available" dialog with release notes + Install button.
-    ///
-    /// We use `checkForUpdates(_:)` here rather than trying to drive the
-    /// download ourselves — the standard user driver handles signing
-    /// verification, the install prompt, and the relaunch dance for us.
-    /// Sparkle will notice the appcast entry it just fetched and skip
-    /// straight to the install prompt.
+    /// Re-open Sparkle's install dialog for the pending update. The
+    /// download is kicked off automatically in `didFindValidUpdate` as
+    /// soon as the recheck finds something, so by the time the user
+    /// clicks the "Install & Restart" button the update is either already
+    /// downloaded or still downloading — either way, `checkForUpdates(_:)`
+    /// reattaches to the existing Sparkle session and surfaces the
+    /// install prompt + relaunch dance.
     func installPendingUpdate() {
         assert(Thread.isMainThread, "UpdaterManager.installPendingUpdate() must be called on main")
         guard pendingUpdate != nil, let controller = updaterController else { return }
@@ -218,8 +227,10 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     // MARK: - SPUUpdaterDelegate
 
     /// Sparkle found a valid update in the appcast. Capture it so the
-    /// Settings UI can enable the "Download and Install" button and show
-    /// "Update available: vX.Y" inline.
+    /// Settings UI can show "Update available: vX.Y" inline, and — if this
+    /// was a user-initiated recheck — immediately hand off to Sparkle's
+    /// standard download+install flow so the user doesn't have to click a
+    /// second button just to start the download.
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -231,6 +242,18 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
                 releaseNotesURL: item.releaseNotesURL
             )
             self.objectWillChange.send()
+
+            // Auto-start download+install flow on user-initiated recheck.
+            // Sparkle's standard user driver will present the "Update
+            // available" dialog, download the signed .zip in the
+            // background, verify the EdDSA signature, and prompt the user
+            // to relaunch. `checkForUpdates(_:)` re-enters the update
+            // session — Sparkle sees the same appcast entry we just found
+            // and skips straight to the download UI.
+            if self.recheckIsUserInitiated {
+                self.recheckIsUserInitiated = false
+                self.updaterController?.checkForUpdates(nil)
+            }
         }
     }
 
@@ -240,6 +263,7 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.isChecking = false
+            self.recheckIsUserInitiated = false
             self.pendingUpdate = nil
             self.lastCheckResult = .upToDate(currentVersion: self.currentVersionString)
             self.objectWillChange.send()
@@ -252,6 +276,7 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.isChecking = false
+            self.recheckIsUserInitiated = false
             self.lastCheckResult = .failed(error: error.localizedDescription)
             self.objectWillChange.send()
         }
@@ -270,6 +295,7 @@ final class UpdaterManager: NSObject, ObservableObject, SPUUpdaterDelegate {
             // state from a prior manual recheck.
             guard self.isChecking else { return }
             self.isChecking = false
+            self.recheckIsUserInitiated = false
             // Sparkle reports "no update found" through this path too
             // (error code SUNoUpdateError) on some configurations — treat
             // that as .upToDate, not a failure.

@@ -446,11 +446,12 @@ struct SettingsView: View {
             }
             .font(.caption)
 
-            // Split flow: Recheck queries the appcast silently, Download
-            // and Install drives Sparkle's standard install dialog for the
-            // pending update. Download is disabled until a recheck has
-            // detected one — prevents clicking Download in an unknown
-            // state and getting Sparkle's generic "up to date" modal.
+            // Recheck queries the appcast. If an update is found, the
+            // UpdaterManager immediately hands off to Sparkle's standard
+            // download+install dialog — the user doesn't have to click
+            // a second button just to start the download. The "Install
+            // & Restart" button below is really just a way to re-open
+            // Sparkle's dialog if the user dismissed it mid-download.
             HStack(spacing: 8) {
                 Button {
                     UpdaterManager.shared.recheck()
@@ -462,7 +463,7 @@ struct SettingsView: View {
                 Button {
                     UpdaterManager.shared.installPendingUpdate()
                 } label: {
-                    Text("Download and Install")
+                    Text("Install & Restart")
                 }
                 .disabled(updater.pendingUpdate == nil)
 
@@ -496,7 +497,7 @@ struct SettingsView: View {
             }
             .font(.caption)
 
-            Text("Use Recheck to query the feed without downloading. Download and Install becomes available once an update has been detected. The toggles below control background behaviour independently.")
+            Text("Recheck queries the feed and starts downloading automatically if an update is found. Install & Restart re-opens Sparkle's install prompt once a download is in progress. The toggles below control background behaviour independently.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
