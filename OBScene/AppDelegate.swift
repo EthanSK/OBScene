@@ -315,14 +315,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(obsManager)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 920),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 660),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "OBScene Settings"
         window.contentView = NSHostingView(rootView: settingsView)
+        // Allow shrinking on small displays (13" MacBooks etc.) but keep
+        // enough room for the two-column layout to remain legible. The
+        // SettingsView itself collapses the Activity column out via
+        // ViewThatFits when the width drops below ~720pt.
+        window.minSize = NSSize(width: 640, height: 460)
+        window.maxSize = NSSize(width: 1600, height: 1200)
         window.center()
+        // Persist last user-chosen size/position across launches. Standard
+        // NSWindow autosave under the OBSceneSettings key in UserDefaults.
+        window.setFrameAutosaveName("OBSceneSettings")
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         window.delegate = self
@@ -473,25 +482,39 @@ extension AppDelegate {
         obsManager.profiles = ["Untitled"]
         obsManager.scenes = ["Scene"]
 
-        // Give the view a fixed width and let the height grow naturally,
-        // then measure. We explicitly override `minHeight` with a tiny value
-        // via `.frame` so the SettingsView's own `minHeight: 920` doesn't
-        // inflate the fitting size — we want the intrinsic content height.
+        // Seed a handful of activity log events so the right-hand Activity
+        // column has something interesting to show in the screenshot, rather
+        // than the empty-state placeholder. The screenshot subprocess never
+        // observes a real display event, so without this the column would be
+        // blank and the new two-column layout wouldn't be obvious.
+        ActivityLog.shared.log(.info, "OBScene started")
+        ActivityLog.shared.log(.info, "Connected to OBS WebSocket")
+        ActivityLog.shared.log(.displayConnected, "External display connected (1 of 1)")
+        ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in 5s")
+        ActivityLog.shared.log(.triggerFired, "Switched to scene 'Scene'")
+        ActivityLog.shared.log(.recordingStarted, "Recording started")
+        // Drain the main queue so the @Published events array updates before
+        // we measure the hosting view (ActivityLog.log dispatches async).
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        // The new layout is a wide two-column window. For the marketing
+        // screenshot we want to show ALL of the left column's content at
+        // once (not clipped behind the ScrollView), so we render at a tall
+        // height — taller than the live default — and the resulting PNG
+        // captures the full settings flow side-by-side with the Activity
+        // panel.
+        let renderWidth: CGFloat = 1080
+        let renderHeight: CGFloat = 1340
         let view = SettingsView()
             .environmentObject(configStore)
             .environmentObject(obsManager)
-            .frame(minWidth: 680, idealWidth: 680, maxWidth: 680,
-                   minHeight: 0, idealHeight: nil, maxHeight: .infinity)
-            .fixedSize(horizontal: true, vertical: true)
+            .frame(width: renderWidth, height: renderHeight)
             .background(Color(NSColor.windowBackgroundColor))
 
         let hosting = NSHostingView(rootView: view)
-        hosting.frame = NSRect(x: 0, y: 0, width: 680, height: 2000)
+        hosting.frame = NSRect(x: 0, y: 0, width: renderWidth, height: renderHeight)
         hosting.layoutSubtreeIfNeeded()
-        let fitting = hosting.fittingSize
-        let size = NSSize(width: 680, height: fitting.height)
-        hosting.frame = NSRect(origin: .zero, size: size)
-        hosting.layoutSubtreeIfNeeded()
+        let size = NSSize(width: renderWidth, height: renderHeight)
 
         // Render at @2x so we get a crisp PNG suitable for Retina displays
         // and the README. We draw into a bitmap whose pixel dimensions are
