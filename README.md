@@ -35,6 +35,15 @@ Dock into your battlestation and OBScene takes care of the boring bits: it switc
 
 ## Installation
 
+### Download a release
+
+Grab the latest signed, notarised build from the [Releases page](https://github.com/EthanSK/OBScene/releases/latest):
+
+- **DMG** (recommended): [OBScene-latest-mac-universal.dmg](https://github.com/EthanSK/OBScene/releases/latest/download/OBScene-latest-mac-universal.dmg) — open and drag OBScene.app into Applications.
+- **ZIP**: [OBScene-latest-mac-universal.zip](https://github.com/EthanSK/OBScene/releases/latest/download/OBScene-latest-mac-universal.zip) — for scripted installs.
+
+Both assets are **universal binaries** (Apple Silicon + Intel) built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml) on every push to `main`. Once Developer ID secrets are configured the releases are signed with `Developer ID Application` and notarised by Apple; until then each release is ad-hoc signed and will prompt Gatekeeper on first launch. See [`docs/RELEASING.md`](docs/RELEASING.md) for release setup.
+
 ### Build from source
 
 ```bash
@@ -45,15 +54,20 @@ open OBScene.xcodeproj
 
 Then hit **Cmd+R** in Xcode. OBScene will appear in your menu bar.
 
-Prefer the command line? You can build without Xcode:
+Prefer the command line? You can build a universal `.app` bundle with one script:
+
+```bash
+./scripts/build-app.sh
+open build/OBScene.app
+```
+
+Or compile the raw binary yourself:
 
 ```bash
 mkdir -p build
 swiftc -O -target arm64-apple-macos13 -parse-as-library \
     -o build/OBScene OBScene/*.swift
 ```
-
-A prebuilt release download is on the roadmap — for now, build from source.
 
 ## Setup
 

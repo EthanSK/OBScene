@@ -1,0 +1,372 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  compute-version:
+    name: Compute release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.meta.outputs.app_version }}
+      display_version: ${{ steps.meta.outputs.display_version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      is_tag_release: ${{ steps.meta.outputs.is_tag_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync and verify version metadata
+        shell: bash
+        run: |
+          ./scripts/sync-version.sh
+          if ! git diff --quiet site/version.json; then
+            echo "::error::site/version.json is out of sync with OBScene/Info.plist."
+            echo "Run ./scripts/sync-version.sh locally and commit the result."
+            git --no-pager diff site/version.json
+            exit 1
+          fi
+
+      - name: Compute metadata
+        id: meta
+        shell: bash
+        env:
+          GITHUB_REF_NAME_ENV: ${{ github.ref_name }}
+          GITHUB_REF_ENV: ${{ github.ref }}
+          GITHUB_RUN_NUMBER_ENV: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          app_version="$(plutil -extract CFBundleShortVersionString raw OBScene/Info.plist)"
+
+          if [[ ! "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Info.plist CFBundleShortVersionString '$app_version' is not a supported semantic version."
+            exit 1
+          fi
+
+          display_version="$app_version"
+
+          if [[ "${GITHUB_REF_ENV}" == refs/tags/v* ]]; then
+            release_tag="${GITHUB_REF_NAME_ENV}"
+            tag_version="${release_tag#v}"
+            tag_base="${tag_version%%-*}"
+            tag_base="${tag_base%%+*}"
+
+            if [[ "$tag_version" != "$app_version" && "$tag_base" != "$app_version" ]]; then
+              echo "::error::Tag '${release_tag}' does not match Info.plist version '${app_version}'."
+              echo "::error::Use v${app_version} (or v${app_version}-build.<n>) for this commit."
+              exit 1
+            fi
+
+            if [[ "$tag_version" == "$app_version" ]]; then
+              release_name="OBScene v${app_version}"
+            else
+              release_name="OBScene ${release_tag}"
+            fi
+
+            {
+              echo "app_version=${app_version}"
+              echo "display_version=${display_version}"
+              echo "release_tag=${release_tag}"
+              echo "release_name=${release_name}"
+              echo "is_tag_release=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          build_num="${GITHUB_RUN_NUMBER_ENV}"
+          canonical_tag="v${app_version}"
+
+          if git ls-remote --tags --refs origin "${canonical_tag}" | grep -q .; then
+            release_tag="v${app_version}-build.${build_num}"
+            release_name="OBScene v${app_version} (build ${build_num})"
+          else
+            release_tag="${canonical_tag}"
+            release_name="OBScene v${app_version}"
+          fi
+
+          {
+            echo "app_version=${app_version}"
+            echo "display_version=${display_version}"
+            echo "release_tag=${release_tag}"
+            echo "release_name=${release_name}"
+            echo "is_tag_release=false"
+          } >> "$GITHUB_OUTPUT"
+
+  build-mac:
+    name: Build macOS (universal)
+    needs: compute-version
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      # ─── macOS Code Signing & Notarisation ───────────────────────────
+      # To enable signed + notarised builds, add these GitHub Actions secrets:
+      #
+      #   APPLE_CERTIFICATE_P12_BASE64  base64-encoded Developer ID .p12
+      #                                 (export from Keychain Access, then
+      #                                  `base64 -i cert.p12 | pbcopy`)
+      #   APPLE_CERTIFICATE_PASSWORD    password used when exporting the .p12
+      #   APPLE_DEVELOPER_ID            e.g. "Developer ID Application: Name (TEAMID)"
+      #   APPLE_ID                      Apple ID email for notarisation
+      #   APPLE_TEAM_ID                 10-char Apple Developer Team ID
+      #   APPLE_APP_PASSWORD            app-specific password
+      #
+      # If APPLE_CERTIFICATE_P12_BASE64 is missing the build falls back to
+      # ad-hoc signing (users will see a Gatekeeper warning). This keeps the
+      # workflow green before secrets are wired up.
+      # ─────────────────────────────────────────────────────────────────
+
+      - name: Import signing certificate
+        id: import-cert
+        if: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' }}
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/apple_cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/obscene-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S "apple-tool:,apple:,codesign:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          existing="$(security list-keychains -d user | tr -d '"' | xargs)"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $existing
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          rm -f "$CERT_PATH"
+          echo "CI_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "imported=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, package, notarise
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./scripts/package-release.sh
+
+      - name: Clean up keychain
+        if: always() && steps.import-cert.outputs.imported == 'true'
+        run: |
+          set +e
+          security delete-keychain "$CI_KEYCHAIN_PATH" || true
+
+      - name: Verify artifacts exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          zips=(build/OBScene-*-mac-universal.zip)
+          dmgs=(build/OBScene-*-mac-universal.dmg)
+          if [ ${#zips[@]} -eq 0 ] || [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::Expected zip + dmg artifacts under build/, found:"
+            ls -lah build/ || true
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: obscene-mac-${{ needs.compute-version.outputs.release_tag }}
+          path: |
+            build/OBScene-*-mac-universal.zip
+            build/OBScene-*-mac-universal.zip.sha256
+            build/OBScene-*-mac-universal.dmg
+            build/OBScene-*-mac-universal.dmg.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    needs:
+      - compute-version
+      - build-mac
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: obscene-mac-${{ needs.compute-version.outputs.release_tag }}
+          merge-multiple: true
+          path: release-assets
+
+      - name: Create stable latest-download aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+
+          for suffix in zip dmg; do
+            matches=(OBScene-*-mac-universal.${suffix})
+            if [ ${#matches[@]} -ne 1 ]; then
+              echo "Expected exactly one OBScene-*-mac-universal.${suffix}, got ${#matches[@]}"
+              ls -lah
+              exit 1
+            fi
+            src="${matches[0]}"
+            alias_name="OBScene-latest-mac-universal.${suffix}"
+            cp "$src" "$alias_name"
+
+            src_sha="$src.sha256"
+            if [ -f "$src_sha" ]; then
+              hash_value="$(awk '{print $1}' "$src_sha")"
+              printf '%s  %s\n' "$hash_value" "$alias_name" > "$alias_name.sha256"
+            fi
+          done
+
+      - name: Show assets
+        run: ls -lah release-assets
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        env:
+          CURRENT_TAG: ${{ needs.compute-version.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force 2>/dev/null || true
+
+          # Find previous tag: skip current, pick newest remaining
+          prev_tag=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1 || true)
+          if [ -z "$prev_tag" ]; then
+            prev_tag=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          echo "Generating changelog: ${prev_tag}..HEAD"
+
+          features=""
+          fixes=""
+          maintenance=""
+          docs=""
+          other=""
+
+          while IFS= read -r line; do
+            # Strip leading short hash. Treat the remainder as untrusted text.
+            msg="${line#* }"
+            # Escape markdown-sensitive characters minimally
+            safe_msg="${msg//\`/\\\`}"
+            if [[ "$safe_msg" == feat:* ]]; then
+              features="${features}\n- ${safe_msg#feat: }"
+            elif [[ "$safe_msg" == feat\(* ]]; then
+              features="${features}\n- ${safe_msg}"
+            elif [[ "$safe_msg" == fix:* ]]; then
+              fixes="${fixes}\n- ${safe_msg#fix: }"
+            elif [[ "$safe_msg" == fix\(* ]]; then
+              fixes="${fixes}\n- ${safe_msg}"
+            elif [[ "$safe_msg" == chore:* || "$safe_msg" == refactor:* ]]; then
+              if [[ "$safe_msg" != *"bump version"* ]]; then
+                maintenance="${maintenance}\n- ${safe_msg#chore: }"
+              fi
+            elif [[ "$safe_msg" == docs:* || "$safe_msg" == doc:* ]]; then
+              docs="${docs}\n- ${safe_msg#docs: }"
+            elif [[ "$safe_msg" != *"bump version"* && "$safe_msg" != "Merge "* ]]; then
+              other="${other}\n- ${safe_msg}"
+            fi
+          done < <(git log --oneline "${prev_tag}..HEAD" -- || true)
+
+          changelog=""
+          [ -n "$features" ] && changelog="${changelog}### Features${features}\n\n"
+          [ -n "$fixes" ] && changelog="${changelog}### Fixes${fixes}\n\n"
+          [ -n "$maintenance" ] && changelog="${changelog}### Maintenance${maintenance}\n\n"
+          [ -n "$docs" ] && changelog="${changelog}### Documentation${docs}\n\n"
+          [ -n "$other" ] && changelog="${changelog}### Other${other}\n\n"
+
+          if [ -z "$changelog" ]; then
+            changelog="Maintenance release.\n"
+          fi
+
+          printf "%b" "$changelog" > /tmp/release_changelog.md
+          echo "prev_tag=${prev_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Compose release body
+        shell: bash
+        env:
+          DISPLAY_VERSION: ${{ needs.compute-version.outputs.display_version }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          PREV_TAG: ${{ steps.changelog.outputs.prev_tag }}
+          RELEASE_TAG: ${{ needs.compute-version.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## OBScene v${DISPLAY_VERSION}"
+            echo ""
+            cat /tmp/release_changelog.md
+            echo "---"
+            echo ""
+            echo "### Install"
+            echo ""
+            echo "1. Download **OBScene-latest-mac-universal.dmg** below."
+            echo "2. Open the DMG and drag **OBScene.app** into **Applications**."
+            echo "3. Launch from Applications. Look for the \`display.2\` icon in your menu bar."
+            echo ""
+            echo "Requires macOS 13 Ventura or later and OBS Studio 28+."
+            echo ""
+            echo "### Stable latest-download links"
+            echo ""
+            echo "| Format | Stable URL |"
+            echo "|--------|------------|"
+            echo "| macOS DMG (universal) | \`https://github.com/${REPO}/releases/latest/download/OBScene-latest-mac-universal.dmg\` |"
+            echo "| macOS ZIP (universal) | \`https://github.com/${REPO}/releases/latest/download/OBScene-latest-mac-universal.zip\` |"
+            echo ""
+            echo "Versioned assets are attached below for auditing/reproducibility."
+            echo ""
+            echo "Commit: \`${SHA}\`"
+            echo "Workflow run: https://github.com/${REPO}/actions/runs/${RUN_ID}"
+            echo ""
+            echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${RELEASE_TAG}"
+          } > /tmp/release_body.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.compute-version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.compute-version.outputs.release_name }}
+          prerelease: false
+          make_latest: true
+          body_path: /tmp/release_body.md
+          files: |
+            release-assets/*

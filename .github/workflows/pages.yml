@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - site/**
+      - OBScene/Info.plist
+      - scripts/sync-version.sh
       - .github/workflows/pages.yml
       - README.md
   workflow_dispatch:
@@ -26,10 +28,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sync landing page version metadata
+        run: ./scripts/sync-version.sh
+
       - name: Validate landing page files
         run: |
           test -f site/index.html
           test -f site/styles.css
+          test -f site/version.json
           test -f site/apple-touch-icon.png
           test -f site/favicon-16.png
           test -f site/favicon-32.png
