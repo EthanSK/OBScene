@@ -334,6 +334,15 @@ struct SettingsView: View {
                         .disabled(!configStore.config.startReplayBuffer)
                         .padding(.leading, 20)
                 }
+
+                Divider().padding(.vertical, 1)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Refresh all browsers", isOn: $configStore.config.refreshBrowsersOnTrigger)
+                    Text("Reloads all tabs in Chrome, Safari, Arc, and Firefox")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)

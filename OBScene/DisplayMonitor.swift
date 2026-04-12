@@ -344,6 +344,17 @@ class DisplayMonitor {
             runProfile {
                 runScene {
                     runStartActions()
+
+                    // Refresh browser tabs after a short delay to fix display
+                    // glitches that occur when monitors are plugged in quickly.
+                    if config.refreshBrowsersOnTrigger {
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + BrowserRefresher.postTriggerDelay
+                        ) {
+                            ActivityLog.shared.log(.info, "Refreshing browser tabs")
+                            BrowserRefresher.refreshAllBrowsers()
+                        }
+                    }
                 }
             }
         }

@@ -109,6 +109,7 @@ struct AppConfig: Codable, Equatable {
     var hasBeenConfigured: Bool = false
     var autoLaunchOBS: Bool = true
     var obsLaunchTimeoutSeconds: Int = 30
+    var refreshBrowsersOnTrigger: Bool = true
 
     init() {}
 
@@ -136,6 +137,7 @@ struct AppConfig: Codable, Equatable {
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
         autoLaunchOBS = try container.decodeIfPresent(Bool.self, forKey: .autoLaunchOBS) ?? autoLaunchOBS
         obsLaunchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .obsLaunchTimeoutSeconds) ?? obsLaunchTimeoutSeconds
+        refreshBrowsersOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshBrowsersOnTrigger) ?? refreshBrowsersOnTrigger
     }
 }
 
