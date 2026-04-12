@@ -508,6 +508,50 @@ class OBSWebSocketManager: ObservableObject {
         sendRequest("StopReplayBuffer")
     }
 
+    /// Refresh all browser sources in OBS by pressing the "Refresh cache of
+    /// current page" button on each one via `PressInputPropertiesButton`.
+    func refreshAllBrowserSources() {
+        sendRequest("GetInputList", data: ["inputKind": "browser_source"]) { [weak self] response in
+            guard let self = self else { return }
+            guard let data = response as? [String: Any],
+                  let inputs = data["inputs"] as? [[String: Any]] else {
+                print("[OBScene] Failed to get browser source list from OBS")
+                DispatchQueue.main.async {
+                    ActivityLog.shared.log(.info, "Failed to list OBS browser sources")
+                }
+                return
+            }
+
+            if inputs.isEmpty {
+                print("[OBScene] No browser sources found in OBS")
+                DispatchQueue.main.async {
+                    ActivityLog.shared.log(.info, "No OBS browser sources to refresh")
+                }
+                return
+            }
+
+            var refreshedCount = 0
+            let total = inputs.count
+
+            for input in inputs {
+                guard let inputName = input["inputName"] as? String else { continue }
+
+                self.sendRequest("PressInputPropertiesButton", data: [
+                    "inputName": inputName,
+                    "propertyName": "refreshnocache"
+                ]) { _ in
+                    refreshedCount += 1
+                    if refreshedCount == total {
+                        print("[OBScene] Refreshed \(refreshedCount) OBS browser source(s)")
+                        DispatchQueue.main.async {
+                            ActivityLog.shared.log(.info, "Refreshed \(refreshedCount) OBS browser source(s)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - OBS process detection + launch
 
     /// Bundle identifier used by OBS Studio on macOS.

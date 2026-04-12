@@ -343,6 +343,13 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Refresh OBS browser sources", isOn: $configStore.config.refreshOBSBrowserSourcesOnTrigger)
+                    Text("Reloads all browser sources in OBS (chat overlays, widgets, etc.)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)

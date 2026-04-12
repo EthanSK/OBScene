@@ -355,6 +355,18 @@ class DisplayMonitor {
                             BrowserRefresher.refreshAllBrowsers()
                         }
                     }
+
+                    // Refresh OBS browser sources (chat overlays, widgets, etc.)
+                    // after a slightly longer delay so OBS has settled after any
+                    // scene/profile switch above.
+                    if config.refreshOBSBrowserSourcesOnTrigger {
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0
+                        ) {
+                            ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
+                            obs.refreshAllBrowserSources()
+                        }
+                    }
                 }
             }
         }
