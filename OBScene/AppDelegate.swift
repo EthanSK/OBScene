@@ -497,14 +497,12 @@ extension AppDelegate {
         // we measure the hosting view (ActivityLog.log dispatches async).
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
-        // The new layout is a wide two-column window. For the marketing
-        // screenshot we want to show ALL of the left column's content at
-        // once (not clipped behind the ScrollView), so we render at a tall
-        // height — taller than the live default — and the resulting PNG
-        // captures the full settings flow side-by-side with the Activity
-        // panel.
-        let renderWidth: CGFloat = 1080
-        let renderHeight: CGFloat = 1340
+        // The new layout is a wide two-column window where the left column
+        // is designed to fit in the default window height without scrolling.
+        // Render at exactly the default user-facing window size so the
+        // marketing screenshot matches what the app actually looks like.
+        let renderWidth: CGFloat = 980
+        let renderHeight: CGFloat = 660
         let view = SettingsView()
             .environmentObject(configStore)
             .environmentObject(obsManager)

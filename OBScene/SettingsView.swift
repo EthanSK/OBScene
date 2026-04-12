@@ -34,46 +34,27 @@ struct SettingsView: View {
         }
     }
 
-    /// Wide layout: primary settings on the left, Activity log pinned to a
-    /// fixed-width right column. Each column scrolls independently so the
-    /// window's vertical axis stays short.
+    /// Wide layout: operational settings on the left (fixed — fits without
+    /// scrolling at the default 980x660 window size), secondary/meta settings
+    /// (Updates, General, Testing) stacked in the right column above a
+    /// scrollable Activity log. Only the Activity panel scrolls.
     private var twoColumnLayout: some View {
         HStack(alignment: .top, spacing: 0) {
-            ScrollView(.vertical, showsIndicators: true) {
-                primarySettingsStack
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .frame(minWidth: 460, idealWidth: 620, maxWidth: .infinity)
+            leftColumn
+                .frame(minWidth: 440, idealWidth: 560, maxWidth: .infinity)
 
             Divider()
 
-            ScrollView(.vertical, showsIndicators: true) {
-                activitySection
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .frame(minWidth: 260, idealWidth: 320, maxWidth: 380)
+            rightColumn
+                .frame(minWidth: 300, idealWidth: 360, maxWidth: 420)
         }
         .frame(minWidth: 760)
     }
 
-    /// Narrow fallback: everything stacked, including Activity at the bottom.
-    /// Used when the window is shrunk below ~760pt of width.
-    private var singleColumnLayout: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 12) {
-                primarySettingsStack
-                activitySection
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-    }
-
-    /// All non-Activity sections stacked vertically. Reused by both layouts.
-    private var primarySettingsStack: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    /// Left column: the four "primary" operational settings groups. Plain
+    /// VStack — no ScrollView — so it must fit at the default window height.
+    private var leftColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
             // First-run / welcome banner. Shown until the user has saved a
             // working configuration once — after that it disappears so the
             // window isn't cluttered on repeat visits.
@@ -81,13 +62,59 @@ struct SettingsView: View {
                 welcomeBanner
             }
 
-            updatesGroup
-            generalGroup
             obsConnectionGroup
             displayTriggerGroup
             obsConfigurationGroup
             triggerActionsGroup
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Right column: Updates, General, Testing pinned at the top; Activity
+    /// log scrolls in the remaining space. Only the Activity panel scrolls.
+    private var rightColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            updatesGroup
+            generalGroup
             testingGroup
+
+            // Activity takes whatever vertical space remains and is the only
+            // element in the window that scrolls independently.
+            ScrollView(.vertical, showsIndicators: true) {
+                activitySection
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Narrow fallback: everything stacked vertically in a single scroll view.
+    /// Used when the window is shrunk below ~760pt of width.
+    private var singleColumnLayout: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 12) {
+                if !configStore.config.hasBeenConfigured {
+                    welcomeBanner
+                }
+
+                updatesGroup
+                generalGroup
+                obsConnectionGroup
+                displayTriggerGroup
+                obsConfigurationGroup
+                triggerActionsGroup
+                testingGroup
+                activitySection
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
@@ -96,14 +123,14 @@ struct SettingsView: View {
     private var updatesGroup: some View {
         GroupBox(label: Label("Updates", systemImage: "arrow.down.circle")) {
             updatesSection
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var generalGroup: some View {
         GroupBox(label: Label("General", systemImage: "gearshape")) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { newValue in
                         setLaunchAtLogin(newValue)
@@ -118,11 +145,11 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
-                Divider().padding(.vertical, 2)
+                Divider().padding(.vertical, 1)
 
                 Toggle("Auto-launch OBS if not running",
                        isOn: $configStore.config.autoLaunchOBS)
-                Text("When a trigger fires and OBS isn't running, OBScene will start OBS Studio and wait for its WebSocket server.")
+                Text("When a trigger fires and OBS isn't running, OBScene will start OBS Studio and wait for its WebSocket.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -131,22 +158,21 @@ struct SettingsView: View {
                     Text("Wait up to")
                     Stepper(value: $configStore.config.obsLaunchTimeoutSeconds,
                             in: 5...120, step: 5) {
-                        Text("\(configStore.config.obsLaunchTimeoutSeconds) seconds")
+                        Text("\(configStore.config.obsLaunchTimeoutSeconds)s")
                             .monospacedDigit()
                     }
-                    Text("for OBS to be ready")
-                        .foregroundColor(.secondary)
+                    Spacer(minLength: 0)
                 }
                 .disabled(!configStore.config.autoLaunchOBS)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var obsConnectionGroup: some View {
         GroupBox(label: Label("OBS WebSocket Connection", systemImage: "network")) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Host:")
                         .frame(width: 80, alignment: .trailing)
@@ -177,14 +203,14 @@ struct SettingsView: View {
                     .disabled(isConnecting)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var displayTriggerGroup: some View {
         GroupBox(label: Label("Display Trigger", systemImage: "display.2")) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Trigger when external displays reach:")
                     Picker("", selection: $configStore.config.requiredExternalDisplays) {
@@ -213,14 +239,14 @@ struct SettingsView: View {
                     Spacer()
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var obsConfigurationGroup: some View {
         GroupBox(label: Label("OBS Configuration", systemImage: "film")) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 if !obsManager.isConnected {
                     Text("Connect to OBS to configure scenes and profiles.")
                         .foregroundColor(.secondary)
@@ -269,15 +295,15 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var triggerActionsGroup: some View {
         GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
-            VStack(alignment: .leading, spacing: 6) {
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Toggle("Start Recording", isOn: $configStore.config.startRecording)
                     Toggle("Also stop recording when displays are unplugged",
                            isOn: $configStore.config.stopRecordingOnUnplug)
@@ -285,7 +311,7 @@ struct SettingsView: View {
                         .padding(.leading, 20)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Toggle("Start Streaming", isOn: $configStore.config.startStreaming)
                     Toggle("Also stop streaming when displays are unplugged",
                            isOn: $configStore.config.stopStreamingOnUnplug)
@@ -293,7 +319,7 @@ struct SettingsView: View {
                         .padding(.leading, 20)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Toggle("Start Virtual Camera", isOn: $configStore.config.startVirtualCam)
                     Toggle("Also stop virtual camera when displays are unplugged",
                            isOn: $configStore.config.stopVirtualCamOnUnplug)
@@ -301,7 +327,7 @@ struct SettingsView: View {
                         .padding(.leading, 20)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Toggle("Start Replay Buffer", isOn: $configStore.config.startReplayBuffer)
                     Toggle("Also stop replay buffer when displays are unplugged",
                            isOn: $configStore.config.stopReplayBufferOnUnplug)
@@ -309,15 +335,15 @@ struct SettingsView: View {
                         .padding(.leading, 20)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var testingGroup: some View {
         GroupBox(label: Label("Testing", systemImage: "play.circle")) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Dry-run the full trigger exactly as if an external display had just been plugged in. Switches scene collection, profile and scene, and runs every enabled start action. The configured trigger delay is skipped.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Dry-run the full trigger as if an external display had just been plugged in — the configured delay is skipped.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -329,7 +355,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -421,12 +447,18 @@ struct SettingsView: View {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
         let feedURLString = updater.feedURL?.absoluteString ?? "https://ethansk.github.io/OBScene/appcast.xml"
 
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text("OBScene v\(version)")
                     .font(.callout)
                     .fontWeight(.medium)
                 Spacer()
+                Text(formattedLastCheck)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             // Inline status line — mirrors Sparkle's internal state in the
@@ -437,21 +469,11 @@ struct SettingsView: View {
                 .animation(.easeInOut(duration: 0.18), value: updater.isChecking)
                 .animation(.easeInOut(duration: 0.18), value: updater.lastCheckResult)
 
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("Last check:")
-                    .foregroundColor(.secondary)
-                Text(formattedLastCheck)
-                    .monospacedDigit()
-                    .foregroundColor(.secondary)
-            }
-            .font(.caption)
-
             // Recheck queries the appcast. If an update is found, the
             // UpdaterManager immediately hands off to Sparkle's standard
-            // download+install dialog — the user doesn't have to click
-            // a second button just to start the download. The "Install
-            // & Restart" button below is really just a way to re-open
-            // Sparkle's dialog if the user dismissed it mid-download.
+            // download+install dialog. The "Install & Restart" button is
+            // really just a way to re-open Sparkle's dialog if the user
+            // dismissed it mid-download.
             HStack(spacing: 8) {
                 Button {
                     UpdaterManager.shared.recheck()
@@ -471,7 +493,7 @@ struct SettingsView: View {
             }
             .animation(.easeInOut(duration: 0.18), value: updater.pendingUpdate != nil)
 
-            Divider().padding(.vertical, 2)
+            Divider().padding(.vertical, 1)
 
             // Binding<Bool> wrappers onto the UpdaterManager properties so
             // SwiftUI drives Sparkle directly without us caching state here.
@@ -479,28 +501,20 @@ struct SettingsView: View {
                 get: { updater.automaticallyChecksForUpdates },
                 set: { updater.automaticallyChecksForUpdates = $0 }
             ))
-            Toggle("Automatically download and install updates", isOn: Binding(
+            Toggle("Automatically download and install", isOn: Binding(
                 get: { updater.automaticallyDownloadsUpdates },
                 set: { updater.automaticallyDownloadsUpdates = $0 }
             ))
             .disabled(!updater.automaticallyChecksForUpdates)
 
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("Feed:")
-                    .foregroundColor(.secondary)
-                Text(feedURLString)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-            .font(.caption)
-
-            Text("Recheck queries the feed and starts downloading automatically if an update is found. Install & Restart re-opens Sparkle's install prompt once a download is in progress. The toggles below control background behaviour independently.")
-                .font(.caption)
+            // Feed URL is informational — hide it in the narrow side panel by
+            // default (still reachable via the single-column layout).
+            Text(feedURLString)
+                .font(.system(.caption2, design: .monospaced))
                 .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
         }
     }
 
