@@ -538,7 +538,7 @@ class OBSWebSocketManager: ObservableObject {
 
                 self.sendRequest("PressInputPropertiesButton", data: [
                     "inputName": inputName,
-                    "propertyName": "refreshnocache"
+                    "propertyName": "refresh"
                 ]) { _ in
                     refreshedCount += 1
                     if refreshedCount == total {
