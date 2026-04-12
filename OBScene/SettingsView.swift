@@ -461,7 +461,7 @@ struct SettingsView: View {
         // Sparkle compares against the appcast and the one shown on the
         // landing page / GitHub release page.
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-        let feedURLString = updater.feedURL?.absoluteString ?? "https://ethansk.github.io/OBScene/appcast.xml"
+        // feedURL removed from UI — not useful to end users
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
@@ -523,14 +523,7 @@ struct SettingsView: View {
             ))
             .disabled(!updater.automaticallyChecksForUpdates)
 
-            // Feed URL is informational — hide it in the narrow side panel by
-            // default (still reachable via the single-column layout).
-            Text(feedURLString)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
+            // Feed URL removed — not useful to end users
         }
     }
 
