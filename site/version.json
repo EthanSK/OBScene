@@ -1,6 +1,6 @@
 {
-  "version": "1.14.0",
-  "displayVersion": "v1.14",
+  "version": "1.15.0",
+  "displayVersion": "v1.15",
   "source": "OBScene/Info.plist",
   "downloadUrl": "https://github.com/EthanSK/OBScene/releases/latest/download/OBScene-latest-mac-universal.zip",
   "releasesUrl": "https://github.com/EthanSK/OBScene/releases/latest",
