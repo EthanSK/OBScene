@@ -16,9 +16,6 @@ struct SettingsView: View {
     @State private var launchAtLoginError: String? = nil
 
     var body: some View {
-        // ViewThatFits collapses to the single-column layout when the window
-        // is too narrow for the side-by-side variant. Users on small displays
-        // can shrink the window all the way down without breaking the layout.
         ViewThatFits(in: .horizontal) {
             twoColumnLayout
             singleColumnLayout
@@ -34,10 +31,8 @@ struct SettingsView: View {
         }
     }
 
-    /// Wide layout: operational settings on the left (fixed — fits without
-    /// scrolling at the default 980x660 window size), secondary/meta settings
-    /// (Updates, General, Testing) stacked in the right column above a
-    /// scrollable Activity log. Only the Activity panel scrolls.
+    // MARK: - Layouts
+
     private var twoColumnLayout: some View {
         HStack(alignment: .top, spacing: 0) {
             leftColumn
@@ -51,39 +46,30 @@ struct SettingsView: View {
         .frame(minWidth: 760)
     }
 
-    /// Left column: the four "primary" operational settings groups. Plain
-    /// VStack — no ScrollView — so it must fit at the default window height.
     private var leftColumn: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // First-run / welcome banner. Shown until the user has saved a
-            // working configuration once — after that it disappears so the
-            // window isn't cluttered on repeat visits.
-            if !configStore.config.hasBeenConfigured {
-                welcomeBanner
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !configStore.config.hasBeenConfigured {
+                    welcomeBanner
+                }
+
+                obsConnectionGroup
+                profilesSection
+
+                Spacer(minLength: 0)
             }
-
-            obsConnectionGroup
-            displayTriggerGroup
-            obsConfigurationGroup
-            triggerActionsGroup
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// Right column: Updates, General, Testing pinned at the top; Activity
-    /// log scrolls in the remaining space. Only the Activity panel scrolls.
     private var rightColumn: some View {
         VStack(alignment: .leading, spacing: 8) {
             updatesGroup
             generalGroup
             testingGroup
 
-            // Activity takes whatever vertical space remains and is the only
-            // element in the window that scrolls independently.
             ScrollView(.vertical, showsIndicators: true) {
                 activitySection
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -95,8 +81,6 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// Narrow fallback: everything stacked vertically in a single scroll view.
-    /// Used when the window is shrunk below ~760pt of width.
     private var singleColumnLayout: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 12) {
@@ -107,14 +91,387 @@ struct SettingsView: View {
                 updatesGroup
                 generalGroup
                 obsConnectionGroup
-                displayTriggerGroup
-                obsConfigurationGroup
-                triggerActionsGroup
+                profilesSection
                 testingGroup
                 activitySection
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    // MARK: - Profiles section (tabbed)
+
+    private var profilesSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            profileTabBar
+            selectedProfileContent
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color(NSColor.separatorColor), lineWidth: 0.5)
+        )
+    }
+
+    private var profileTabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(configStore.config.profiles.enumerated()), id: \.element.id) { index, profile in
+                    profileTab(for: profile, index: index)
+                }
+
+                // Add profile button
+                Button(action: addProfile) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Add a new profile")
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
+        }
+    }
+
+    private func profileTab(for profile: TriggerProfile, index: Int) -> some View {
+        let isSelected = safeSelectedIndex == index
+
+        return HStack(spacing: 4) {
+            // On/off toggle
+            Circle()
+                .fill(profile.isEnabled ? Color.green : Color.gray.opacity(0.4))
+                .frame(width: 7, height: 7)
+                .onTapGesture {
+                    configStore.config.profiles[index].isEnabled.toggle()
+                }
+                .help(profile.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
+
+            Image(systemName: profile.triggerType.symbol)
+                .font(.system(size: 10))
+                .foregroundColor(isSelected ? .primary : .secondary)
+
+            Text(profile.name)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .lineLimit(1)
+
+            // Remove button (only if more than one profile)
+            if configStore.config.profiles.count > 1 {
+                Button(action: { removeProfile(at: index) }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .opacity(isSelected ? 0.6 : 0.3)
+                .help("Remove this profile")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            configStore.config.selectedProfileIndex = index
+        }
+    }
+
+    /// Safe index that clamps to valid range.
+    private var safeSelectedIndex: Int {
+        let count = configStore.config.profiles.count
+        guard count > 0 else { return 0 }
+        return min(max(configStore.config.selectedProfileIndex, 0), count - 1)
+    }
+
+    /// Binding to the currently selected profile.
+    private var selectedProfileBinding: Binding<TriggerProfile> {
+        let index = safeSelectedIndex
+        return Binding(
+            get: {
+                guard index < configStore.config.profiles.count else {
+                    return TriggerProfile()
+                }
+                return configStore.config.profiles[index]
+            },
+            set: { newValue in
+                guard index < configStore.config.profiles.count else { return }
+                configStore.config.profiles[index] = newValue
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var selectedProfileContent: some View {
+        if configStore.config.profiles.isEmpty {
+            Text("No profiles. Click + to add one.")
+                .foregroundColor(.secondary)
+                .italic()
+                .padding()
+        } else {
+            let profile = selectedProfileBinding
+            VStack(alignment: .leading, spacing: 8) {
+                profileNameAndTriggerType(profile: profile)
+                Divider().padding(.horizontal, 8)
+                triggerSettingsGroup(profile: profile)
+                Divider().padding(.horizontal, 8)
+                obsConfigurationGroup(profile: profile)
+                Divider().padding(.horizontal, 8)
+                triggerActionsGroup(profile: profile)
+            }
+            .padding(10)
+        }
+    }
+
+    private func profileNameAndTriggerType(profile: Binding<TriggerProfile>) -> some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                Text("Name:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                TextField("Profile name", text: profile.name)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
+            }
+
+            HStack(spacing: 4) {
+                Text("Trigger:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Picker("", selection: profile.triggerType) {
+                    ForEach(TriggerProfile.TriggerType.allCases, id: \.self) { type in
+                        Label(type.label, systemImage: type.symbol).tag(type)
+                    }
+                }
+                .frame(width: 160)
+            }
+
+            Toggle("Enabled", isOn: profile.isEnabled)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func triggerSettingsGroup(profile: Binding<TriggerProfile>) -> some View {
+        GroupBox(label: Label("Trigger Settings", systemImage: profile.wrappedValue.triggerType.symbol)) {
+            VStack(alignment: .leading, spacing: 8) {
+                if profile.wrappedValue.triggerType == .display {
+                    displayTriggerSettings(profile: profile)
+                } else {
+                    usbTriggerSettings(profile: profile)
+                }
+
+                HStack {
+                    Text("Delay before triggering:")
+                    TextField("5", value: profile.triggerDelay, formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                    Text("seconds")
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func displayTriggerSettings(profile: Binding<TriggerProfile>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Trigger when external displays reach:")
+                Picker("", selection: profile.requiredExternalDisplays) {
+                    ForEach(1...8, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .frame(width: 60)
+                Spacer()
+            }
+
+            HStack {
+                Text("Current external displays:")
+                    .foregroundColor(.secondary)
+                Text("\(DisplayMonitor.shared.externalDisplayCount)")
+                    .fontWeight(.medium)
+                Spacer()
+            }
+        }
+    }
+
+    private func usbTriggerSettings(profile: Binding<TriggerProfile>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("USB device name:")
+                TextField("e.g. CalDigit TS4", text: profile.usbDeviceName)
+                    .textFieldStyle(.roundedBorder)
+                Spacer()
+            }
+            Text("Triggers when a USB device whose name contains this text is plugged in (case-insensitive).")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !USBMonitor.shared.connectedDeviceNames.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Currently connected USB devices:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    ForEach(Array(USBMonitor.shared.connectedDeviceNames.sorted()), id: \.self) { name in
+                        HStack(spacing: 4) {
+                            Image(systemName: "cable.connector")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(name)
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func obsConfigurationGroup(profile: Binding<TriggerProfile>) -> some View {
+        GroupBox(label: Label("OBS Configuration", systemImage: "film")) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !obsManager.isConnected {
+                    Text("Connect to OBS to configure scenes and profiles.")
+                        .foregroundColor(.secondary)
+                        .italic()
+                } else {
+                    HStack {
+                        Text("Scene Collection:")
+                            .frame(width: 120, alignment: .trailing)
+                        Picker("", selection: profile.selectedSceneCollection) {
+                            Text("(Don't change)").tag("")
+                            ForEach(obsManager.sceneCollections, id: \.self) { collection in
+                                Text(collection).tag(collection)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Text("Profile:")
+                            .frame(width: 120, alignment: .trailing)
+                        Picker("", selection: profile.selectedProfile) {
+                            Text("(Don't change)").tag("")
+                            ForEach(obsManager.profiles, id: \.self) { obsProfile in
+                                Text(obsProfile).tag(obsProfile)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Text("Scene:")
+                            .frame(width: 120, alignment: .trailing)
+                        Picker("", selection: profile.selectedScene) {
+                            Text("(Don't change)").tag("")
+                            ForEach(obsManager.scenes, id: \.self) { scene in
+                                Text(scene).tag(scene)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button("Refresh") {
+                            obsManager.fetchSceneCollections()
+                            obsManager.fetchProfiles()
+                            obsManager.fetchScenes()
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func triggerActionsGroup(profile: Binding<TriggerProfile>) -> some View {
+        GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
+            VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Start Recording", isOn: profile.startRecording)
+                    Toggle("Also stop recording on disconnect",
+                           isOn: profile.stopRecordingOnUnplug)
+                        .disabled(!profile.wrappedValue.startRecording)
+                        .padding(.leading, 20)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Start Streaming", isOn: profile.startStreaming)
+                    Toggle("Also stop streaming on disconnect",
+                           isOn: profile.stopStreamingOnUnplug)
+                        .disabled(!profile.wrappedValue.startStreaming)
+                        .padding(.leading, 20)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Start Virtual Camera", isOn: profile.startVirtualCam)
+                    Toggle("Also stop virtual camera on disconnect",
+                           isOn: profile.stopVirtualCamOnUnplug)
+                        .disabled(!profile.wrappedValue.startVirtualCam)
+                        .padding(.leading, 20)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Start Replay Buffer", isOn: profile.startReplayBuffer)
+                    Toggle("Also stop replay buffer on disconnect",
+                           isOn: profile.stopReplayBufferOnUnplug)
+                        .disabled(!profile.wrappedValue.startReplayBuffer)
+                        .padding(.leading, 20)
+                }
+
+                Divider().padding(.vertical, 1)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Refresh all browsers", isOn: profile.refreshBrowsersOnTrigger)
+                    Text("Reloads all tabs in Chrome, Safari, Arc, and Firefox")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Refresh OBS browser sources", isOn: profile.refreshOBSBrowserSourcesOnTrigger)
+                    Text("Reloads all browser sources in OBS (chat overlays, widgets, etc.)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - Profile management
+
+    private func addProfile() {
+        var newProfile = TriggerProfile()
+        newProfile.name = "Profile \(configStore.config.profiles.count + 1)"
+        configStore.config.profiles.append(newProfile)
+        configStore.config.selectedProfileIndex = configStore.config.profiles.count - 1
+    }
+
+    private func removeProfile(at index: Int) {
+        guard configStore.config.profiles.count > 1 else { return }
+        configStore.config.profiles.remove(at: index)
+        if configStore.config.selectedProfileIndex >= configStore.config.profiles.count {
+            configStore.config.selectedProfileIndex = max(0, configStore.config.profiles.count - 1)
         }
     }
 
@@ -208,167 +565,23 @@ struct SettingsView: View {
         }
     }
 
-    private var displayTriggerGroup: some View {
-        GroupBox(label: Label("Display Trigger", systemImage: "display.2")) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Trigger when external displays reach:")
-                    Picker("", selection: $configStore.config.requiredExternalDisplays) {
-                        ForEach(1...8, id: \.self) { count in
-                            Text("\(count)").tag(count)
-                        }
-                    }
-                    .frame(width: 60)
-                    Spacer()
-                }
-
-                HStack {
-                    Text("Delay before triggering:")
-                    TextField("15", value: $configStore.config.triggerDelay, formatter: NumberFormatter())
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 60)
-                    Text("seconds")
-                    Spacer()
-                }
-
-                HStack {
-                    Text("Current external displays:")
-                        .foregroundColor(.secondary)
-                    Text("\(DisplayMonitor.shared.externalDisplayCount)")
-                        .fontWeight(.medium)
-                    Spacer()
-                }
-            }
-            .padding(.vertical, 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var obsConfigurationGroup: some View {
-        GroupBox(label: Label("OBS Configuration", systemImage: "film")) {
-            VStack(alignment: .leading, spacing: 8) {
-                if !obsManager.isConnected {
-                    Text("Connect to OBS to configure scenes and profiles.")
-                        .foregroundColor(.secondary)
-                        .italic()
-                } else {
-                    HStack {
-                        Text("Scene Collection:")
-                            .frame(width: 120, alignment: .trailing)
-                        Picker("", selection: $configStore.config.selectedSceneCollection) {
-                            Text("(Don't change)").tag("")
-                            ForEach(obsManager.sceneCollections, id: \.self) { collection in
-                                Text(collection).tag(collection)
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Text("Profile:")
-                            .frame(width: 120, alignment: .trailing)
-                        Picker("", selection: $configStore.config.selectedProfile) {
-                            Text("(Don't change)").tag("")
-                            ForEach(obsManager.profiles, id: \.self) { profile in
-                                Text(profile).tag(profile)
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Text("Scene:")
-                            .frame(width: 120, alignment: .trailing)
-                        Picker("", selection: $configStore.config.selectedScene) {
-                            Text("(Don't change)").tag("")
-                            ForEach(obsManager.scenes, id: \.self) { scene in
-                                Text(scene).tag(scene)
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Spacer()
-                        Button("Refresh") {
-                            obsManager.fetchSceneCollections()
-                            obsManager.fetchProfiles()
-                            obsManager.fetchScenes()
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var triggerActionsGroup: some View {
-        GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
-            VStack(alignment: .leading, spacing: 4) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Recording", isOn: $configStore.config.startRecording)
-                    Toggle("Also stop recording when displays are unplugged",
-                           isOn: $configStore.config.stopRecordingOnUnplug)
-                        .disabled(!configStore.config.startRecording)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Streaming", isOn: $configStore.config.startStreaming)
-                    Toggle("Also stop streaming when displays are unplugged",
-                           isOn: $configStore.config.stopStreamingOnUnplug)
-                        .disabled(!configStore.config.startStreaming)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Virtual Camera", isOn: $configStore.config.startVirtualCam)
-                    Toggle("Also stop virtual camera when displays are unplugged",
-                           isOn: $configStore.config.stopVirtualCamOnUnplug)
-                        .disabled(!configStore.config.startVirtualCam)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Replay Buffer", isOn: $configStore.config.startReplayBuffer)
-                    Toggle("Also stop replay buffer when displays are unplugged",
-                           isOn: $configStore.config.stopReplayBufferOnUnplug)
-                        .disabled(!configStore.config.startReplayBuffer)
-                        .padding(.leading, 20)
-                }
-
-                Divider().padding(.vertical, 1)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Refresh all browsers", isOn: $configStore.config.refreshBrowsersOnTrigger)
-                    Text("Reloads all tabs in Chrome, Safari, Arc, and Firefox")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Refresh OBS browser sources", isOn: $configStore.config.refreshOBSBrowserSourcesOnTrigger)
-                    Text("Reloads all browser sources in OBS (chat overlays, widgets, etc.)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding(.vertical, 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
     private var testingGroup: some View {
         GroupBox(label: Label("Testing", systemImage: "play.circle")) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Dry-run the full trigger as if an external display had just been plugged in — the configured delay is skipped.")
+                Text("Dry-run the selected profile's trigger as if the trigger condition was just met. The configured delay is skipped.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
                     Spacer()
-                    Button("Simulate Display Connection") {
-                        DisplayMonitor.shared.runTestTrigger()
+                    Button("Simulate Trigger") {
+                        let index = safeSelectedIndex
+                        guard index < configStore.config.profiles.count else { return }
+                        let profile = configStore.config.profiles[index]
+                        DisplayMonitor.shared.runTestTrigger(for: profile)
                     }
+                    .disabled(configStore.config.profiles.isEmpty)
                 }
             }
             .padding(.vertical, 2)
@@ -376,9 +589,6 @@ struct SettingsView: View {
         }
     }
 
-    /// Activity log — lives in the right column in the wide layout, and falls
-    /// back to the bottom of the single column when collapsed. Shows up to 12
-    /// recent events; the column itself is wrapped in a ScrollView upstream.
     private var activitySection: some View {
         GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
             VStack(alignment: .leading, spacing: 8) {
@@ -436,8 +646,6 @@ struct SettingsView: View {
                 try service.unregister()
             }
             launchAtLoginError = nil
-            // Status may not flip immediately when the user has to approve in
-            // System Settings, so reflect the actual status rather than intent.
             DispatchQueue.main.async {
                 let actual = SMAppService.mainApp.status == .enabled
                 if actual != enabled {
@@ -449,7 +657,6 @@ struct SettingsView: View {
             }
         } catch {
             launchAtLoginError = "Failed to update: \(error.localizedDescription)"
-            // Revert toggle to reflect actual status.
             DispatchQueue.main.async {
                 launchAtLogin = SMAppService.mainApp.status == .enabled
             }
@@ -457,11 +664,7 @@ struct SettingsView: View {
     }
 
     private var updatesSection: some View {
-        // Pull the bundle's short version string — this matches the value
-        // Sparkle compares against the appcast and the one shown on the
-        // landing page / GitHub release page.
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-        // feedURL removed from UI — not useful to end users
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
@@ -477,19 +680,11 @@ struct SettingsView: View {
                     .truncationMode(.tail)
             }
 
-            // Inline status line — mirrors Sparkle's internal state in the
-            // Settings UI so the user can see "up to date" / "update
-            // available: vX.Y" at a glance without digging through a modal.
             updateStatusLine
                 .font(.caption)
                 .animation(.easeInOut(duration: 0.18), value: updater.isChecking)
                 .animation(.easeInOut(duration: 0.18), value: updater.lastCheckResult)
 
-            // Recheck queries the appcast. If an update is found, the
-            // UpdaterManager immediately hands off to Sparkle's standard
-            // download+install dialog. The "Install & Restart" button is
-            // really just a way to re-open Sparkle's dialog if the user
-            // dismissed it mid-download.
             HStack(spacing: 8) {
                 Button {
                     UpdaterManager.shared.recheck()
@@ -501,7 +696,7 @@ struct SettingsView: View {
                 Button {
                     UpdaterManager.shared.installPendingUpdate()
                 } label: {
-                    Text("Install & Restart")
+                    Text("Install")
                 }
                 .disabled(updater.pendingUpdate == nil)
 
@@ -511,8 +706,6 @@ struct SettingsView: View {
 
             Divider().padding(.vertical, 1)
 
-            // Binding<Bool> wrappers onto the UpdaterManager properties so
-            // SwiftUI drives Sparkle directly without us caching state here.
             Toggle("Automatically check for updates", isOn: Binding(
                 get: { updater.automaticallyChecksForUpdates },
                 set: { updater.automaticallyChecksForUpdates = $0 }
@@ -522,8 +715,6 @@ struct SettingsView: View {
                 set: { updater.automaticallyDownloadsUpdates = $0 }
             ))
             .disabled(!updater.automaticallyChecksForUpdates)
-
-            // Feed URL removed — not useful to end users
         }
     }
 
@@ -579,9 +770,6 @@ struct SettingsView: View {
     }
 
     private var formattedLastCheck: String {
-        // Screenshot-render subprocess never boots Sparkle, so surface a
-        // plausible placeholder instead of "Never" — otherwise the captured
-        // PNG shows an empty "Last check" row which looks broken.
         if ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil {
             return "Today, checked in the background"
         }
@@ -602,7 +790,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Welcome to OBScene")
                     .font(.headline)
-                Text("Connect to OBS below, choose the scene/profile to switch to, and pick the trigger actions. When your external displays come online, OBScene will switch OBS and (optionally) start recording or streaming automatically.")
+                Text("Connect to OBS below, create profiles with trigger conditions, and pick the actions for each. When your trigger conditions are met, OBScene will switch OBS and (optionally) start recording or streaming automatically.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -630,8 +818,6 @@ struct SettingsView: View {
                 .fill(obsManager.isConnected ? Color.green : (obsManager.connectionError != nil ? Color.orange : Color.red))
                 .frame(width: 8, height: 8)
             if let error = obsManager.connectionError, !error.isEmpty {
-                // Show the error inline but truncated — the window can be
-                // narrow, and the full error is in the log anyway.
                 Text("Error: \(error)")
                     .font(.caption)
                     .foregroundColor(.red)
@@ -662,7 +848,6 @@ struct SettingsView: View {
 
         obsManager.connect(host: obsHost, port: port, password: obsPassword)
 
-        // Reset connecting state after a moment
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             isConnecting = false
         }

@@ -5,6 +5,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
     private let displayMonitor = DisplayMonitor.shared
+    private let usbMonitor = USBMonitor.shared
     private let obsManager = OBSWebSocketManager.shared
     private let configStore = ConfigStore.shared
 
@@ -12,6 +13,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var obsStatusMenuItem: NSMenuItem!
     private var sceneMenuItem: NSMenuItem!
     private var displayCountMenuItem: NSMenuItem!
+    private var profilesSummaryMenuItem: NSMenuItem!
     private var lastTriggerMenuItem: NSMenuItem!
     private var recordingStatusMenuItem: NSMenuItem!
 
@@ -39,17 +41,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         setupMenuBar()
-        // Ask for banner permission up-front so the first trigger fire has a
-        // decided answer. Users who deny keep full functionality without
-        // banners.
         UserNotifier.requestPermission()
         displayMonitor.startMonitoring()
+        usbMonitor.startMonitoring()
         connectToOBSIfConfigured()
 
-        // Boot Sparkle auto-updater. Reads SUFeedURL / SUPublicEDKey /
-        // SUEnableAutomaticChecks from Info.plist and begins its scheduled
-        // check loop immediately. See OBScene/UpdaterManager.swift and
-        // docs/RELEASING.md for the release-side signing + appcast flow.
+        // Boot Sparkle auto-updater.
         UpdaterManager.shared.start()
 
         let center = NotificationCenter.default
@@ -78,22 +75,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        // USB device connection/disconnection handlers
+        notificationObservers.append(
+            center.addObserver(forName: .usbDeviceConnected, object: nil, queue: .main) { [weak self] note in
+                self?.handleUSBDeviceConnected(note)
+            }
+        )
+
+        notificationObservers.append(
+            center.addObserver(forName: .usbDeviceDisconnected, object: nil, queue: .main) { [weak self] note in
+                self?.handleUSBDeviceDisconnected(note)
+            }
+        )
+
         // Refresh menu state once up-front.
         refreshMenuState()
 
-        // Decide whether to pop the settings window on launch:
-        //   1. First-run (unconfigured) — always show settings so the user
-        //      knows what to do.
-        //   2. Manual launch (Finder double-click, Spotlight, Dock) — show
-        //      settings so the menu-bar app gives visible feedback rather than
-        //      silently going resident.
-        //   3. Login-item launch (SMAppService / launchd at login) — stay
-        //      silent; the user hasn't asked to see anything.
-        //
-        // We detect (3) via the AppleEvent that launched the process: when
-        // macOS starts a login item it sets the keyAELaunchedAsLogInItem
-        // property on the open-application event. Any other launch (double
-        // click, Spotlight, `open -a`) omits it.
         let shouldShowSettingsOnLaunch =
             !configStore.config.hasBeenConfigured || !Self.launchedAsLoginItem()
 
@@ -104,34 +101,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Returns true when the process was launched by macOS as a login item
-    /// (SMAppService / launchd at login), false when the user launched it
-    /// directly (Finder, Spotlight, Dock, `open -a`). Used to decide whether
-    /// to pop the settings window on launch.
     private static func launchedAsLoginItem() -> Bool {
         guard let event = NSAppleEventManager.shared().currentAppleEvent else {
-            // No AppleEvent at all — not a GUI launch. Treat as login item
-            // so we stay silent (this also covers the screenshot-render
-            // subprocess path, which exits before this is reached anyway).
             return true
         }
-
-        // Only the open-application event is interesting.
         guard event.eventClass == kCoreEventClass, event.eventID == kAEOpenApplication else {
             return false
         }
-
-        // The login-item flag is exposed via the AEPropData descriptor under
-        // keyAEPropData; its enum value equals keyAELaunchedAsLogInItem when
-        // launchd started us as a login item.
         let propDesc = event.paramDescriptor(forKeyword: keyAEPropData)
         return propDesc?.enumCodeValue == keyAELaunchedAsLogInItem
     }
 
-    /// Called when the user re-launches the app while it's already running
-    /// (double-clicking the .app in Finder, clicking it in the Dock, etc.).
-    /// For an LSUIElement menu-bar app this is the user's only feedback that
-    /// anything happened, so pop the settings window.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             openSettings()
@@ -148,10 +128,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Tidy up shared singletons so we don't leave a CG callback registered
-        // or a WebSocket loop spinning if the process lingers (e.g. while
-        // crash reporters or system services hold us alive briefly).
         displayMonitor.stopMonitoring()
+        usbMonitor.stopMonitoring()
         obsManager.disconnect()
 
         let center = NotificationCenter.default
@@ -161,15 +139,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         notificationObservers.removeAll()
     }
 
+    // MARK: - USB Device Handling
+
+    private func handleUSBDeviceConnected(_ notification: Notification) {
+        guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
+
+        let matchingProfiles = ConfigStore.shared.usbProfilesMatching(deviceName: deviceName)
+        for profile in matchingProfiles {
+            print("[OBScene] USB device '\(deviceName)' matched profile '\(profile.name)'")
+            ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)'")
+            displayMonitor.scheduleUSBTrigger(for: profile)
+        }
+    }
+
+    private func handleUSBDeviceDisconnected(_ notification: Notification) {
+        guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
+
+        let matchingProfiles = ConfigStore.shared.usbProfilesMatching(deviceName: deviceName)
+        for profile in matchingProfiles {
+            print("[OBScene] USB device '\(deviceName)' disconnected — unplug trigger for '\(profile.name)'")
+            ActivityLog.shared.log(.info, "USB device '\(deviceName)' disconnected (\(profile.name))")
+            displayMonitor.executeUSBUnplugTrigger(for: profile)
+        }
+    }
+
     // MARK: - Menu bar
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            // Ethan prefers the original "two screens" icon — a single,
-            // static `display.2` template. No state-based swapping: the
-            // dropdown menu already shows connection + display status.
             let image = NSImage(systemSymbolName: "display.2",
                                 accessibilityDescription: "OBScene")
             image?.isTemplate = true
@@ -196,9 +195,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         sceneMenuItem.isEnabled = false
         menu.addItem(sceneMenuItem)
 
-        displayCountMenuItem = NSMenuItem(title: "Displays: 0 / 1 external", action: nil, keyEquivalent: "")
+        displayCountMenuItem = NSMenuItem(title: "Displays: 0 external", action: nil, keyEquivalent: "")
         displayCountMenuItem.isEnabled = false
         menu.addItem(displayCountMenuItem)
+
+        profilesSummaryMenuItem = NSMenuItem(title: "Profiles: none", action: nil, keyEquivalent: "")
+        profilesSummaryMenuItem.isEnabled = false
+        menu.addItem(profilesSummaryMenuItem)
 
         recordingStatusMenuItem = NSMenuItem(title: "Recording on connect: Off", action: nil, keyEquivalent: "")
         recordingStatusMenuItem.isEnabled = false
@@ -224,9 +227,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         aboutItem.target = self
         menu.addItem(aboutItem)
 
-        // "Check for Updates…" drives Sparkle's user-initiated update flow.
-        // Target is UpdaterManager.shared — the selector on that class
-        // calls `SPUStandardUpdaterController.checkForUpdates(_:)`.
         let checkForUpdatesItem = NSMenuItem(
             title: "Check for Updates…",
             action: #selector(UpdaterManager.checkForUpdates(_:)),
@@ -269,31 +269,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             sceneMenuItem.title = "Scene: —"
         }
 
-        // External display status, shown as current / required.
+        // External display count
         let current = displayMonitor.externalDisplayCount
-        let required = config.requiredExternalDisplays
-        let noun = required == 1 ? "display" : "displays"
-        if current >= required {
-            displayCountMenuItem.title = "Displays: \(current) / \(required) external (ready)"
+        displayCountMenuItem.title = "Displays: \(current) external"
+
+        // Profiles summary
+        let enabledProfiles = config.profiles.filter { $0.isEnabled }
+        if enabledProfiles.isEmpty {
+            profilesSummaryMenuItem.title = "Profiles: none enabled"
         } else {
-            displayCountMenuItem.title = "Displays: \(current) / \(required) external \(noun) (waiting)"
+            let names = enabledProfiles.map { $0.name }.joined(separator: ", ")
+            profilesSummaryMenuItem.title = "Profiles: \(names)"
         }
 
-        // Trigger-actions summary so users can see what'll happen at a glance.
-        var actions: [String] = []
-        if config.startRecording { actions.append("Record") }
-        if config.startStreaming { actions.append("Stream") }
-        if config.startVirtualCam { actions.append("Virtual Cam") }
-        if config.startReplayBuffer { actions.append("Replay Buffer") }
+        // Trigger-actions summary across all enabled profiles.
+        var actions = Set<String>()
+        for profile in enabledProfiles {
+            if profile.startRecording { actions.insert("Record") }
+            if profile.startStreaming { actions.insert("Stream") }
+            if profile.startVirtualCam { actions.insert("Virtual Cam") }
+            if profile.startReplayBuffer { actions.insert("Replay Buffer") }
+        }
         if actions.isEmpty {
             recordingStatusMenuItem.title = "Trigger actions: scene switch only"
         } else {
-            recordingStatusMenuItem.title = "Trigger actions: \(actions.joined(separator: " + "))"
+            recordingStatusMenuItem.title = "Trigger actions: \(actions.sorted().joined(separator: " + "))"
         }
-
-        // The status-item symbol is fixed at `display.2` — see setupMenuBar.
-        // Connection / readiness state lives in the dropdown menu items
-        // above, so swapping the icon adds noise without information.
     }
 
     private func truncate(_ s: String, limit: Int) -> String {
@@ -315,22 +316,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(obsManager)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "OBScene Settings"
         window.contentView = NSHostingView(rootView: settingsView)
-        // Allow shrinking on small displays (13" MacBooks etc.) but keep
-        // enough room for the two-column layout to remain legible. The
-        // SettingsView itself collapses the Activity column out via
-        // ViewThatFits when the width drops below ~720pt.
-        window.minSize = NSSize(width: 640, height: 460)
+        window.minSize = NSSize(width: 640, height: 500)
         window.maxSize = NSSize(width: 1600, height: 1200)
         window.center()
-        // Persist last user-chosen size/position across launches. Standard
-        // NSWindow autosave under the OBSceneSettings key in UserDefaults.
         window.setFrameAutosaveName("OBSceneSettings")
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -351,7 +346,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
 
-        // Build a small credits string with a clickable GitHub link.
         let credits = NSMutableAttributedString()
         credits.append(NSAttributedString(
             string: "Automates OBS recording & streaming when external displays connect.\n\n",
@@ -407,24 +401,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.lastTriggerMenuItem.title = "Last trigger: \(timeString)"
             self.refreshMenuState()
 
-            // Build a human summary of what actually happened so the banner
-            // is useful, not just "Trigger fired".
-            let config = self.configStore.config
-            var parts: [String] = []
-            if !config.selectedSceneCollection.isEmpty {
-                parts.append("Collection → \(config.selectedSceneCollection)")
+            // Extract profile from notification if available.
+            let profile = notification.userInfo?["profile"] as? TriggerProfile
+            let profileName = profile?.name ?? "Unknown"
+
+            var parts: [String] = ["Profile: \(profileName)"]
+            if let p = profile {
+                if !p.selectedSceneCollection.isEmpty {
+                    parts.append("Collection → \(p.selectedSceneCollection)")
+                }
+                if !p.selectedProfile.isEmpty {
+                    parts.append("Profile → \(p.selectedProfile)")
+                }
+                if !p.selectedScene.isEmpty {
+                    parts.append("Scene → \(p.selectedScene)")
+                }
+                if p.startRecording { parts.append("Started recording") }
+                if p.startStreaming { parts.append("Started streaming") }
+                if p.startVirtualCam { parts.append("Started virtual camera") }
+                if p.startReplayBuffer { parts.append("Started replay buffer") }
             }
-            if !config.selectedProfile.isEmpty {
-                parts.append("Profile → \(config.selectedProfile)")
-            }
-            if !config.selectedScene.isEmpty {
-                parts.append("Scene → \(config.selectedScene)")
-            }
-            if config.startRecording { parts.append("Started recording") }
-            if config.startStreaming { parts.append("Started streaming") }
-            if config.startVirtualCam { parts.append("Started virtual camera") }
-            if config.startReplayBuffer { parts.append("Started replay buffer") }
-            let body = parts.isEmpty ? "Displays reached target count." : parts.joined(separator: "\n")
+            let body = parts.joined(separator: "\n")
 
             UserNotifier.post(
                 title: "OBScene trigger fired",
@@ -436,15 +433,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func displayUnplugTriggerFired(_ notification: Notification) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            let config = self.configStore.config
-            var parts: [String] = []
-            if config.stopRecordingOnUnplug { parts.append("Stopped recording") }
-            if config.stopStreamingOnUnplug { parts.append("Stopped streaming") }
-            if config.stopVirtualCamOnUnplug { parts.append("Stopped virtual camera") }
-            if config.stopReplayBufferOnUnplug { parts.append("Stopped replay buffer") }
-            let body = parts.isEmpty ? "Displays disconnected." : parts.joined(separator: "\n")
+            let profile = notification.userInfo?["profile"] as? TriggerProfile
+            let profileName = profile?.name ?? "Unknown"
+
+            var parts: [String] = ["Profile: \(profileName)"]
+            if let p = profile {
+                if p.stopRecordingOnUnplug { parts.append("Stopped recording") }
+                if p.stopStreamingOnUnplug { parts.append("Stopped streaming") }
+                if p.stopVirtualCamOnUnplug { parts.append("Stopped virtual camera") }
+                if p.stopReplayBufferOnUnplug { parts.append("Stopped replay buffer") }
+            }
+            let body = parts.joined(separator: "\n")
             UserNotifier.post(
-                title: "OBScene: displays unplugged",
+                title: "OBScene: trigger stopped",
                 body: body
             )
             self.refreshMenuState()
@@ -474,35 +475,21 @@ extension AppDelegate {
     /// Offscreen render of the `SettingsView` at its natural content size,
     /// used by the release screenshot tooling (`OBSCENE_RENDER_SETTINGS=path`).
     fileprivate func renderSettingsToPNG(path: String) {
-        // Pretend we're connected to OBS with some plausible scenes/profiles
-        // so the settings view shows its fully-populated state rather than
-        // the "Connect to OBS to configure scenes and profiles." placeholder.
         obsManager.isConnected = true
         obsManager.sceneCollections = ["Untitled"]
         obsManager.profiles = ["Untitled"]
         obsManager.scenes = ["Scene"]
 
-        // Seed a handful of activity log events so the right-hand Activity
-        // column has something interesting to show in the screenshot, rather
-        // than the empty-state placeholder. The screenshot subprocess never
-        // observes a real display event, so without this the column would be
-        // blank and the new two-column layout wouldn't be obvious.
         ActivityLog.shared.log(.info, "OBScene started")
         ActivityLog.shared.log(.info, "Connected to OBS WebSocket")
         ActivityLog.shared.log(.displayConnected, "External display connected (1 of 1)")
         ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in 5s")
         ActivityLog.shared.log(.triggerFired, "Switched to scene 'Scene'")
         ActivityLog.shared.log(.recordingStarted, "Recording started")
-        // Drain the main queue so the @Published events array updates before
-        // we measure the hosting view (ActivityLog.log dispatches async).
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
-        // The new layout is a wide two-column window where the left column
-        // is designed to fit in the default window height without scrolling.
-        // Render at exactly the default user-facing window size so the
-        // marketing screenshot matches what the app actually looks like.
         let renderWidth: CGFloat = 980
-        let renderHeight: CGFloat = 660
+        let renderHeight: CGFloat = 720
         let view = SettingsView()
             .environmentObject(configStore)
             .environmentObject(obsManager)
@@ -514,9 +501,6 @@ extension AppDelegate {
         hosting.layoutSubtreeIfNeeded()
         let size = NSSize(width: renderWidth, height: renderHeight)
 
-        // Render at @2x so we get a crisp PNG suitable for Retina displays
-        // and the README. We draw into a bitmap whose pixel dimensions are
-        // double the point size.
         let scale: CGFloat = 2.0
         let pixelW = Int(size.width * scale)
         let pixelH = Int(size.height * scale)
@@ -536,7 +520,7 @@ extension AppDelegate {
             NSLog("[OBScene] Failed to create bitmap rep")
             return
         }
-        bitmap.size = size  // point size — cacheDisplay will scale up
+        bitmap.size = size
 
         hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
 
@@ -555,18 +539,11 @@ extension AppDelegate {
 }
 
 extension AppDelegate {
-    /// Offscreen render of `MenuBarDropdownMockupView` to a PNG, triggered by
-    /// `OBSCENE_RENDER_MENU=<path>`. Used by the README + landing page
-    /// screenshots to show the menu-bar dropdown alongside the settings
-    /// window. NSMenu isn't a capturable window so we can't `screencapture`
-    /// the real dropdown — the SwiftUI facsimile is the cleanest path.
     fileprivate func renderMenuBarDropdownToPNG(path: String) {
         let view = MenuBarDropdownMockupView()
             .fixedSize(horizontal: true, vertical: true)
 
         let hosting = NSHostingView(rootView: view)
-        // Give it an oversized starting frame then let fittingSize collapse
-        // to the content. Mirrors `renderSettingsToPNG`.
         hosting.frame = NSRect(x: 0, y: 0, width: 600, height: 1200)
         hosting.layoutSubtreeIfNeeded()
         let fitting = hosting.fittingSize
@@ -610,16 +587,8 @@ extension AppDelegate {
     }
 }
 
-/// NSWindow subclass that refuses the default "clamp to visible screen"
-/// behaviour, used only by `OBSCENE_SCREENSHOT=1` so we can render the
-/// full-height settings view on small external displays for promo shots.
-
-
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
-        // Pull the freshest state every time the menu drops down — cheap,
-        // keeps scene/collection labels in sync with reality without needing
-        // @Published subscriptions from AppKit land.
         refreshMenuState()
     }
 }

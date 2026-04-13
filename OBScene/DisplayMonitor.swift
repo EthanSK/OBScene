@@ -32,7 +32,9 @@ class DisplayMonitor {
 
     private(set) var externalDisplayCount: Int = 0
     private var isMonitoring = false
-    private var triggerWorkItem: DispatchWorkItem?
+
+    /// Per-profile pending trigger work items, keyed by profile ID.
+    private var triggerWorkItems: [UUID: DispatchWorkItem] = [:]
 
     private init() {
         updateDisplayCount()
@@ -40,7 +42,7 @@ class DisplayMonitor {
 
     deinit {
         stopMonitoring()
-        cancelPendingTrigger()
+        cancelAllPendingTriggers()
     }
 
     func startMonitoring() {
@@ -81,24 +83,27 @@ class DisplayMonitor {
             )
         }
 
-        let config = ConfigStore.shared.config
-        let requiredDisplays = config.requiredExternalDisplays
+        // Evaluate each enabled display profile independently.
+        let store = ConfigStore.shared
+        let displayProfiles = store.enabledProfiles(ofType: .display)
 
-        // Trigger when we reach the required number of external displays
-        // and previously we had fewer
-        if externalDisplayCount >= requiredDisplays && previousCount < requiredDisplays {
-            scheduleTrigger(delay: config.triggerDelay)
-        }
+        for profile in displayProfiles {
+            let required = profile.requiredExternalDisplays
 
-        // Cancel pending trigger if displays were disconnected, and fire the
-        // "displays unplugged" trigger so listeners can stop recording/streaming.
-        if externalDisplayCount < requiredDisplays && previousCount >= requiredDisplays {
-            cancelPendingTrigger()
-            // Also abort any in-flight OBS auto-launch wait — the trigger is
-            // no longer going to fire, so polling the socket is pointless.
-            OBSWebSocketManager.shared.cancelInflightEnsureConnected()
-            ActivityLog.shared.log(.info, "Pending trigger cancelled")
-            executeUnplugTrigger()
+            // Trigger when we reach the required number of external displays
+            // and previously we had fewer
+            if externalDisplayCount >= required && previousCount < required {
+                scheduleTrigger(for: profile)
+            }
+
+            // Cancel pending trigger if displays were disconnected, and fire
+            // the unplug trigger.
+            if externalDisplayCount < required && previousCount >= required {
+                cancelPendingTrigger(for: profile.id)
+                OBSWebSocketManager.shared.cancelInflightEnsureConnected()
+                ActivityLog.shared.log(.info, "Pending trigger cancelled (\(profile.name))")
+                executeUnplugTrigger(for: profile)
+            }
         }
     }
 
@@ -115,17 +120,19 @@ class DisplayMonitor {
         externalDisplayCount = max(0, externalCount)
     }
 
-    private func scheduleTrigger(delay: Int) {
-        cancelPendingTrigger()
+    private func scheduleTrigger(for profile: TriggerProfile) {
+        cancelPendingTrigger(for: profile.id)
 
+        let profileId = profile.id
+        let delay = profile.triggerDelay
         let workItem = DispatchWorkItem { [weak self] in
-            self?.executeTrigger()
+            self?.executeTrigger(for: profileId)
         }
-        triggerWorkItem = workItem
+        triggerWorkItems[profileId] = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
 
-        print("[OBScene] Display trigger scheduled in \(delay) seconds")
-        ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in \(delay)s")
+        print("[OBScene] Display trigger scheduled in \(delay)s for profile '\(profile.name)'")
+        ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in \(delay)s (\(profile.name))")
 
         // Kick off OBS auto-launch + WebSocket warm-up in parallel with the
         // countdown so that by the time the delay elapses, OBS is hopefully
@@ -140,73 +147,112 @@ class DisplayMonitor {
                 password: config.obsPassword,
                 autoLaunch: config.autoLaunchOBS,
                 timeoutSeconds: config.obsLaunchTimeoutSeconds,
-                onReady: { _ in
-                    // The result is consumed by executeTrigger — it'll run
-                    // ensureConnected again when the delay fires and either
-                    // get `.connected` immediately or block until the shared
-                    // wait finishes. We don't need to do anything here.
-                }
+                onReady: { _ in }
             )
         }
     }
 
-    private func cancelPendingTrigger() {
-        triggerWorkItem?.cancel()
-        triggerWorkItem = nil
+    private func cancelPendingTrigger(for profileId: UUID) {
+        triggerWorkItems[profileId]?.cancel()
+        triggerWorkItems.removeValue(forKey: profileId)
     }
 
-    /// Run the full trigger path as if an external display had just reached
-    /// the required count. Used by the Settings "Simulate Display Connection"
-    /// button so the user can dry-run their configuration without replugging.
-    ///
-    /// Unlike real triggers, this:
-    ///   - fires immediately (ignores `config.triggerDelay`)
-    ///   - still respects auto-launch OBS (launches OBS if needed)
-    ///   - still runs scene collection + profile + scene switch + all 4 start
-    ///     actions, with the same inter-action delays as a real trigger
-    ///
-    /// i.e. it's identical to a real trigger, minus the countdown delay.
+    private func cancelAllPendingTriggers() {
+        for (_, item) in triggerWorkItems {
+            item.cancel()
+        }
+        triggerWorkItems.removeAll()
+    }
+
+    /// Schedule a trigger for a USB profile.
+    func scheduleUSBTrigger(for profile: TriggerProfile) {
+        let delay = profile.triggerDelay
+        let profileId = profile.id
+
+        // Cancel any existing pending trigger for this profile.
+        cancelPendingTrigger(for: profileId)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.executeTrigger(for: profileId)
+        }
+        triggerWorkItems[profileId] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
+
+        print("[OBScene] USB trigger scheduled in \(delay)s for profile '\(profile.name)'")
+        ActivityLog.shared.log(.triggerScheduled, "USB trigger scheduled in \(delay)s (\(profile.name))")
+
+        // Kick off OBS auto-launch in parallel.
+        let obs = OBSWebSocketManager.shared
+        let config = ConfigStore.shared.config
+        if !obs.isConnected && config.hasBeenConfigured && !config.obsHost.isEmpty {
+            _ = obs.ensureConnected(
+                host: config.obsHost,
+                port: config.obsPort,
+                password: config.obsPassword,
+                autoLaunch: config.autoLaunchOBS,
+                timeoutSeconds: config.obsLaunchTimeoutSeconds,
+                onReady: { _ in }
+            )
+        }
+    }
+
+    /// Fire the unplug trigger for a USB profile.
+    func executeUSBUnplugTrigger(for profile: TriggerProfile) {
+        cancelPendingTrigger(for: profile.id)
+        executeUnplugTrigger(for: profile)
+    }
+
+    /// Run the full trigger path for a specific profile. Used by the Settings
+    /// "Simulate Trigger" button so the user can dry-run their configuration
+    /// without replugging.
+    func runTestTrigger(for profile: TriggerProfile) {
+        cancelPendingTrigger(for: profile.id)
+        ActivityLog.shared.log(.info, "Test trigger requested (\(profile.name))")
+        executeTrigger(for: profile.id)
+    }
+
+    /// Legacy test trigger for backward compat — fires the first enabled profile.
     func runTestTrigger() {
-        // Cancel any real pending trigger so the test can't fight with it.
-        cancelPendingTrigger()
-        ActivityLog.shared.log(.info, "Test trigger requested (simulating display connection)")
-        executeTrigger()
+        let profiles = ConfigStore.shared.config.profiles.filter { $0.isEnabled }
+        if let first = profiles.first {
+            runTestTrigger(for: first)
+        } else {
+            ActivityLog.shared.log(.info, "No enabled profiles to test")
+        }
     }
 
-    func executeTrigger() {
-        triggerWorkItem = nil
+    func executeTrigger(for profileId: UUID) {
+        triggerWorkItems.removeValue(forKey: profileId)
+
+        // Look up the profile from the current config (it may have been edited
+        // since the trigger was scheduled).
+        guard let profile = ConfigStore.shared.config.profiles.first(where: { $0.id == profileId }),
+              profile.isEnabled else {
+            print("[OBScene] Trigger fired but profile not found or disabled")
+            return
+        }
 
         let config = ConfigStore.shared.config
         let obs = OBSWebSocketManager.shared
 
         // Fast path: already connected, fire immediately.
         if obs.isConnected {
-            runTriggerActions()
+            runTriggerActions(for: profile)
             return
         }
 
-        // Not connected. Try to auto-launch OBS (or just reconnect to an
-        // already-running OBS) and fire when the WebSocket is up.
+        // Not connected. Try to auto-launch OBS.
         guard config.hasBeenConfigured, !config.obsHost.isEmpty else {
             print("[OBScene] Trigger fired but OBS connection is not configured")
-            ActivityLog.shared.log(.info, "Trigger fired, but OBS not configured")
+            ActivityLog.shared.log(.info, "Trigger fired, but OBS not configured (\(profile.name))")
             return
         }
 
-        // Pick a timeout. If OBS is already running we only need enough time
-        // for the WebSocket handshake to complete (OBS usually binds the
-        // socket within a second of startup, but we give it some slack). If
-        // OBS is cold we respect the full user-configured launch timeout.
-        //
-        // Note: scheduleTrigger may already have kicked off a parallel
-        // ensureConnected during the delay countdown — in that case this
-        // call supersedes it but inherits the launched OBS process, so the
-        // shorter timeout is usually fine.
         let obsAlreadyRunning = obs.isOBSRunning()
         let timeout = obsAlreadyRunning ? 10 : config.obsLaunchTimeoutSeconds
 
-        print("[OBScene] Trigger fired, waiting for OBS WebSocket (timeout: \(timeout)s)")
-        ActivityLog.shared.log(.info, "Waiting for OBS WebSocket (\(timeout)s)")
+        print("[OBScene] Trigger fired for '\(profile.name)', waiting for OBS WebSocket (timeout: \(timeout)s)")
+        ActivityLog.shared.log(.info, "Waiting for OBS WebSocket (\(timeout)s) (\(profile.name))")
 
         _ = obs.ensureConnected(
             host: config.obsHost,
@@ -218,9 +264,9 @@ class DisplayMonitor {
                 guard let self = self else { return }
                 switch result {
                 case .connected:
-                    self.runTriggerActions()
+                    self.runTriggerActions(for: profile)
                 case .cancelled:
-                    print("[OBScene] Auto-launch cancelled (displays unplugged mid-wait)")
+                    print("[OBScene] Auto-launch cancelled for '\(profile.name)'")
                 case .obsNotInstalled:
                     print("[OBScene] OBS is not installed")
                     ActivityLog.shared.log(.info, "OBS is not installed")
@@ -264,43 +310,29 @@ class DisplayMonitor {
     // OBS doesn't expose synchronous confirmation over the WebSocket v5
     // request/response channel for scene collection + profile switches
     // (the collection-changed event comes later), so we sequence the steps
-    // with small fixed delays instead. Keeping them as named constants so
-    // the next person to tweak them knows exactly what each gap guards.
-    //
-    // If reliability regresses on slower machines, bump these — especially
-    // `collectionToProfileDelay`, which guards the slowest OBS reload step.
-    // See also docs/RELEASING.md "Trigger sequencing" for the rationale.
+    // with small fixed delays instead.
     private static let collectionToProfileDelay: TimeInterval = 0.5  // 500ms
     private static let profileToSceneDelay:      TimeInterval = 0.5  // 500ms
     private static let sceneToActionsDelay:      TimeInterval = 0.25 // 250ms
 
-    private func runTriggerActions() {
-        let config = ConfigStore.shared.config
+    private func runTriggerActions(for profile: TriggerProfile) {
         let obs = OBSWebSocketManager.shared
 
-        print("[OBScene] Display trigger fired! Executing OBS actions...")
-        ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions")
+        print("[OBScene] Trigger fired for '\(profile.name)'! Executing OBS actions...")
+        ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions (\(profile.name))")
 
-        NotificationCenter.default.post(name: .displayTriggerFired, object: nil)
-
-        // Build the step pipeline as an ordered sequence. Each step runs on
-        // the main queue and schedules the next with the configured delay,
-        // so delays compose naturally and we never fire a later step before
-        // the earlier one has at least been issued. Skipped steps fall
-        // through immediately (no delay) — we only pay latency for steps the
-        // user actually enabled.
-        //
-        // (We use asyncAfter from .now() at each hop rather than pre-computing
-        // absolute deadlines so that a slow main queue doesn't compress the
-        // gaps between steps — the gap is always "500ms after the previous
-        // request was posted", regardless of scheduling jitter.)
+        NotificationCenter.default.post(
+            name: .displayTriggerFired,
+            object: nil,
+            userInfo: ["profile": profile]
+        )
 
         func runSceneCollection(then next: @escaping () -> Void) {
-            if config.selectedSceneCollection.isEmpty {
+            if profile.selectedSceneCollection.isEmpty {
                 next()
                 return
             }
-            obs.setSceneCollection(config.selectedSceneCollection)
+            obs.setSceneCollection(profile.selectedSceneCollection)
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + Self.collectionToProfileDelay,
                 execute: next
@@ -308,11 +340,11 @@ class DisplayMonitor {
         }
 
         func runProfile(then next: @escaping () -> Void) {
-            if config.selectedProfile.isEmpty {
+            if profile.selectedProfile.isEmpty {
                 next()
                 return
             }
-            obs.setProfile(config.selectedProfile)
+            obs.setProfile(profile.selectedProfile)
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + Self.profileToSceneDelay,
                 execute: next
@@ -320,11 +352,11 @@ class DisplayMonitor {
         }
 
         func runScene(then next: @escaping () -> Void) {
-            if config.selectedScene.isEmpty {
+            if profile.selectedScene.isEmpty {
                 next()
                 return
             }
-            obs.setScene(config.selectedScene)
+            obs.setScene(profile.selectedScene)
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + Self.sceneToActionsDelay,
                 execute: next
@@ -332,12 +364,10 @@ class DisplayMonitor {
         }
 
         func runStartActions() {
-            // These four are independent — no ordering constraint between
-            // them, so fire in parallel.
-            if config.startRecording    { obs.startRecording()    }
-            if config.startStreaming    { obs.startStreaming()    }
-            if config.startVirtualCam   { obs.startVirtualCam()   }
-            if config.startReplayBuffer { obs.startReplayBuffer() }
+            if profile.startRecording    { obs.startRecording()    }
+            if profile.startStreaming    { obs.startStreaming()    }
+            if profile.startVirtualCam   { obs.startVirtualCam()   }
+            if profile.startReplayBuffer { obs.startReplayBuffer() }
         }
 
         runSceneCollection {
@@ -345,9 +375,7 @@ class DisplayMonitor {
                 runScene {
                     runStartActions()
 
-                    // Refresh browser tabs after a short delay to fix display
-                    // glitches that occur when monitors are plugged in quickly.
-                    if config.refreshBrowsersOnTrigger {
+                    if profile.refreshBrowsersOnTrigger {
                         DispatchQueue.main.asyncAfter(
                             deadline: .now() + BrowserRefresher.postTriggerDelay
                         ) {
@@ -356,10 +384,7 @@ class DisplayMonitor {
                         }
                     }
 
-                    // Refresh OBS browser sources (chat overlays, widgets, etc.)
-                    // after a slightly longer delay so OBS has settled after any
-                    // scene/profile switch above.
-                    if config.refreshOBSBrowserSourcesOnTrigger {
+                    if profile.refreshOBSBrowserSourcesOnTrigger {
                         DispatchQueue.main.asyncAfter(
                             deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0
                         ) {
@@ -372,38 +397,31 @@ class DisplayMonitor {
         }
     }
 
-    private func executeUnplugTrigger() {
-        let config = ConfigStore.shared.config
-
+    private func executeUnplugTrigger(for profile: TriggerProfile) {
         // Nothing to do if no stop-on-unplug option is enabled.
-        guard config.stopRecordingOnUnplug
-                || config.stopStreamingOnUnplug
-                || config.stopVirtualCamOnUnplug
-                || config.stopReplayBufferOnUnplug else { return }
+        guard profile.stopRecordingOnUnplug
+                || profile.stopStreamingOnUnplug
+                || profile.stopVirtualCamOnUnplug
+                || profile.stopReplayBufferOnUnplug else { return }
 
         let obs = OBSWebSocketManager.shared
 
         guard obs.isConnected else {
-            print("[OBScene] Unplug trigger fired but OBS is not connected")
+            print("[OBScene] Unplug trigger fired for '\(profile.name)' but OBS is not connected")
             return
         }
 
-        print("[OBScene] Displays unplugged! Executing stop actions...")
+        print("[OBScene] Unplug trigger for '\(profile.name)'! Executing stop actions...")
 
-        NotificationCenter.default.post(name: .displayUnplugTriggerFired, object: nil)
+        NotificationCenter.default.post(
+            name: .displayUnplugTriggerFired,
+            object: nil,
+            userInfo: ["profile": profile]
+        )
 
-        // Stop immediately — no delay on teardown.
-        if config.stopRecordingOnUnplug {
-            obs.stopRecording()
-        }
-        if config.stopStreamingOnUnplug {
-            obs.stopStreaming()
-        }
-        if config.stopVirtualCamOnUnplug {
-            obs.stopVirtualCam()
-        }
-        if config.stopReplayBufferOnUnplug {
-            obs.stopReplayBuffer()
-        }
+        if profile.stopRecordingOnUnplug    { obs.stopRecording()    }
+        if profile.stopStreamingOnUnplug    { obs.stopStreaming()    }
+        if profile.stopVirtualCamOnUnplug   { obs.stopVirtualCam()   }
+        if profile.stopReplayBufferOnUnplug { obs.stopReplayBuffer() }
     }
 }
