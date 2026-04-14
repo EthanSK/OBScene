@@ -15,6 +15,23 @@ struct SettingsView: View {
     @State private var launchAtLogin: Bool = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil
     @State private var launchAtLoginError: String? = nil
 
+    /// Live snapshot of currently-connected USB devices. Seeded on first appear
+    /// and refreshed whenever the USBMonitor posts a connect/disconnect
+    /// notification, so the picker stays in sync while Settings is open.
+    @State private var connectedUSBDevices: [USBDeviceInfo] = []
+
+    /// Profile IDs whose USB picker the user explicitly switched into
+    /// "Custom name…" mode. We need to track this separately from the saved
+    /// `usbDeviceName` because the user may type a custom string that happens
+    /// to match a connected device, and we still want the picker to stay in
+    /// custom mode until they pick something else.
+    @State private var customUSBModeProfileIDs: Set<UUID> = []
+
+    /// Sentinel tag stored in the picker's selection state to mean
+    /// "the user wants to type a custom device name". Chosen to be something
+    /// a real device name can't collide with.
+    private static let customDeviceSentinel = "__obscene_custom_usb_name__"
+
     var body: some View {
         ViewThatFits(in: .horizontal) {
             twoColumnLayout
@@ -28,6 +45,13 @@ struct SettingsView: View {
             if ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] == nil {
                 refreshLaunchAtLoginStatus()
             }
+            refreshConnectedUSBDevices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .usbDeviceConnected)) { _ in
+            refreshConnectedUSBDevices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .usbDeviceDisconnected)) { _ in
+            refreshConnectedUSBDevices()
         }
     }
 
@@ -338,37 +362,101 @@ struct SettingsView: View {
     }
 
     private func usbTriggerSettings(profile: Binding<TriggerProfile>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("USB device name:")
-                TextField("e.g. CalDigit TS4", text: profile.usbDeviceName)
-                    .textFieldStyle(.roundedBorder)
-                Spacer()
-            }
-            Text("Triggers when a USB device whose name contains this text is plugged in (case-insensitive).")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        // Decide whether this profile's picker should be in "Custom name…" mode.
+        //
+        // Rules:
+        //   1. If the user explicitly chose "Custom name…" in this session, stay
+        //      in custom mode (tracked in `customUSBModeProfileIDs`).
+        //   2. Otherwise, if the stored `usbDeviceName` is non-empty and does NOT
+        //      match any currently-connected device, assume the saved value is
+        //      a free-text entry for a device that isn't plugged in right now.
+        //   3. Otherwise (empty, or matches a connected device), show the
+        //      device picker with the matching device selected (or no selection
+        //      if empty).
+        let profileID = profile.wrappedValue.id
+        let currentName = profile.wrappedValue.usbDeviceName
+        let matchesConnectedDevice = connectedUSBDevices.contains { $0.name == currentName }
+        let isCustomMode = customUSBModeProfileIDs.contains(profileID)
+            || (!currentName.isEmpty && !matchesConnectedDevice)
 
-            if !USBMonitor.shared.connectedDeviceNames.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Currently connected USB devices:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    ForEach(Array(USBMonitor.shared.connectedDeviceNames.sorted()), id: \.self) { name in
-                        HStack(spacing: 4) {
-                            Image(systemName: "cable.connector")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                            Text(name)
-                                .font(.caption)
-                                .foregroundColor(.primary)
-                                .textSelection(.enabled)
+        let pickerSelection = Binding<String>(
+            get: {
+                if isCustomMode { return Self.customDeviceSentinel }
+                // Empty name maps to the empty-tag placeholder when no devices
+                // are connected; when devices ARE connected but none is picked,
+                // also use empty to avoid an invalid-selection warning (the
+                // placeholder row is always present).
+                return currentName
+            },
+            set: { newValue in
+                if newValue == Self.customDeviceSentinel {
+                    // User explicitly switched to custom-name mode. Remember
+                    // that choice and leave `usbDeviceName` untouched so any
+                    // previously-typed string is preserved for editing.
+                    customUSBModeProfileIDs.insert(profileID)
+                    return
+                }
+                // User picked an actual device (or the empty placeholder).
+                // Leave custom mode and write the device name through.
+                customUSBModeProfileIDs.remove(profileID)
+                profile.wrappedValue.usbDeviceName = newValue
+            }
+        )
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("USB device:")
+                Picker("", selection: pickerSelection) {
+                    // Always include an empty-tag placeholder so a blank
+                    // `usbDeviceName` has a valid selection target and SwiftUI
+                    // doesn't warn about an unmatched picker selection.
+                    if connectedUSBDevices.isEmpty {
+                        Text("(No USB devices detected)").tag("")
+                    } else {
+                        Text("Select a device…").tag("")
+                        ForEach(connectedUSBDevices, id: \.id) { device in
+                            Text(device.displayLabel).tag(device.name)
                         }
                     }
+                    Divider()
+                    Text("Custom name…").tag(Self.customDeviceSentinel)
                 }
+                .frame(maxWidth: 320)
+
+                Button(action: refreshConnectedUSBDevices) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh the list of currently-connected USB devices.")
+
+                Spacer()
+            }
+
+            if isCustomMode {
+                HStack {
+                    Text("Custom name:")
+                    TextField("e.g. CalDigit TS4", text: profile.usbDeviceName)
+                        .textFieldStyle(.roundedBorder)
+                    Spacer()
+                }
+                Text("Triggers when a USB device whose name contains this text is plugged in (case-insensitive). Use this for devices that aren't currently plugged in.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Triggers when this USB device is plugged in. Pick \"Custom name…\" to match a device by name instead (useful when the device isn't currently connected).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// Refresh the cached snapshot of connected USB devices. Called on
+    /// appear, on the manual Refresh button, and when the USBMonitor posts
+    /// a connect/disconnect notification.
+    private func refreshConnectedUSBDevices() {
+        connectedUSBDevices = USBMonitor.shared.currentUSBDevices()
     }
 
     private func obsConfigurationGroup(profile: Binding<TriggerProfile>) -> some View {

@@ -7,6 +7,29 @@ extension Notification.Name {
     static let usbDeviceDisconnected = Notification.Name("usbDeviceDisconnected")
 }
 
+/// Metadata for a currently-connected USB device, used by the Settings picker.
+struct USBDeviceInfo: Hashable, Identifiable {
+    let name: String
+    let vendorName: String?
+    let vendorID: UInt?
+    let productID: UInt?
+
+    var id: String {
+        // Disambiguate devices that share the same name (e.g. two of the same
+        // mic) using vendor/product IDs when available.
+        "\(name)|\(vendorID ?? 0)|\(productID ?? 0)"
+    }
+
+    /// Human-readable label for the picker: "Name — Vendor" when vendor is
+    /// known, otherwise just the name.
+    var displayLabel: String {
+        if let vendor = vendorName, !vendor.isEmpty {
+            return "\(name) — \(vendor)"
+        }
+        return name
+    }
+}
+
 /// Monitors USB device connections and disconnections using IOKit.
 ///
 /// When a USB device is plugged in whose name matches a profile's configured
@@ -119,22 +142,74 @@ class USBMonitor {
     /// Returns the set of USB device product names currently connected.
     private func currentUSBDeviceNames() -> Set<String> {
         var names = Set<String>()
-        guard let matchingDict = IOServiceMatching(kIOUSBDeviceClassName) else { return names }
+        for info in currentUSBDevices() {
+            names.insert(info.name)
+        }
+        return names
+    }
+
+    /// Returns the full metadata for every USB device currently connected.
+    /// Exposed publicly so the Settings UI can render a picker of available
+    /// devices without standing up its own IOKit enumerator.
+    ///
+    /// The list is de-duplicated on the `USBDeviceInfo.id` (name + vendor/
+    /// product IDs), then sorted by display label so repeat calls return a
+    /// stable order for SwiftUI.
+    func currentUSBDevices() -> [USBDeviceInfo] {
+        var devices: [USBDeviceInfo] = []
+        guard let matchingDict = IOServiceMatching(kIOUSBDeviceClassName) else { return devices }
         var iterator: io_iterator_t = 0
 
         let result = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDict, &iterator)
-        guard result == KERN_SUCCESS else { return names }
+        guard result == KERN_SUCCESS else { return devices }
 
         var device = IOIteratorNext(iterator)
         while device != 0 {
-            if let name = deviceName(for: device) {
-                names.insert(name)
+            if let info = deviceInfo(for: device) {
+                devices.append(info)
             }
             IOObjectRelease(device)
             device = IOIteratorNext(iterator)
         }
         IOObjectRelease(iterator)
-        return names
+
+        // De-dup on id, then sort by display label for stable UI ordering.
+        var seen = Set<String>()
+        let unique = devices.filter { seen.insert($0.id).inserted }
+        return unique.sorted { $0.displayLabel.localizedCaseInsensitiveCompare($1.displayLabel) == .orderedAscending }
+    }
+
+    /// Full IOKit-sourced metadata for a single device node.
+    private func deviceInfo(for device: io_service_t) -> USBDeviceInfo? {
+        guard let name = deviceName(for: device) else { return nil }
+
+        let vendorName = IORegistryEntryCreateCFProperty(
+            device,
+            "USB Vendor Name" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() as? String
+
+        let vendorID = (IORegistryEntryCreateCFProperty(
+            device,
+            "idVendor" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() as? NSNumber)?.uintValue
+
+        let productID = (IORegistryEntryCreateCFProperty(
+            device,
+            "idProduct" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() as? NSNumber)?.uintValue
+
+        return USBDeviceInfo(
+            name: name,
+            vendorName: vendorName?.isEmpty == true ? nil : vendorName,
+            vendorID: vendorID,
+            productID: productID
+        )
     }
 
     /// Extract the product name from an IOService device.
