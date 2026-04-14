@@ -83,26 +83,45 @@ class DisplayMonitor {
             )
         }
 
-        // Evaluate each enabled display profile independently.
+        // Evaluate each enabled display profile independently. A profile
+        // only fires on its own configured edge (plug-in OR plug-out, not
+        // both) — users combine two profiles to react to both edges.
         let store = ConfigStore.shared
         let displayProfiles = store.enabledProfiles(ofType: .display)
 
         for profile in displayProfiles {
             let required = profile.requiredExternalDisplays
+            let crossedUp = externalDisplayCount >= required && previousCount < required
+            let crossedDown = externalDisplayCount < required && previousCount >= required
 
-            // Trigger when we reach the required number of external displays
-            // and previously we had fewer
-            if externalDisplayCount >= required && previousCount < required {
-                scheduleTrigger(for: profile)
-            }
-
-            // Cancel pending trigger if displays were disconnected, and fire
-            // the unplug trigger.
-            if externalDisplayCount < required && previousCount >= required {
-                cancelPendingTrigger(for: profile.id)
-                OBSWebSocketManager.shared.cancelInflightEnsureConnected()
-                ActivityLog.shared.log(.info, "Pending trigger cancelled (\(profile.name))")
-                executeUnplugTrigger(for: profile)
+            switch profile.mode {
+            case .plugIn:
+                if crossedUp {
+                    scheduleTrigger(for: profile)
+                }
+                if crossedDown {
+                    // A plug-in profile that was armed but hasn't fired yet
+                    // should be cancelled when the condition goes away. The
+                    // plug-out edge itself is someone else's problem (handled
+                    // by plug-out profiles further down this loop).
+                    if triggerWorkItems[profile.id] != nil {
+                        cancelPendingTrigger(for: profile.id)
+                        OBSWebSocketManager.shared.cancelInflightEnsureConnected()
+                        ActivityLog.shared.log(.info, "Pending trigger cancelled (\(profile.name))")
+                    }
+                }
+            case .plugOut:
+                if crossedDown {
+                    scheduleTrigger(for: profile)
+                }
+                if crossedUp {
+                    // Plug-out profile armed by an earlier drop but displays
+                    // came back before the delay elapsed — cancel.
+                    if triggerWorkItems[profile.id] != nil {
+                        cancelPendingTrigger(for: profile.id)
+                        ActivityLog.shared.log(.info, "Pending plug-out trigger cancelled (\(profile.name))")
+                    }
+                }
             }
         }
     }
@@ -196,10 +215,13 @@ class DisplayMonitor {
         }
     }
 
-    /// Fire the unplug trigger for a USB profile.
-    func executeUSBUnplugTrigger(for profile: TriggerProfile) {
-        cancelPendingTrigger(for: profile.id)
-        executeUnplugTrigger(for: profile)
+    /// Cancel any pending trigger for a USB profile. Used when the matching
+    /// USB device disappears before the profile's plug-in delay elapses.
+    func cancelUSBPendingTrigger(for profile: TriggerProfile) {
+        if triggerWorkItems[profile.id] != nil {
+            cancelPendingTrigger(for: profile.id)
+            ActivityLog.shared.log(.info, "Pending USB trigger cancelled (\(profile.name))")
+        }
     }
 
     /// Run the full trigger path for a specific profile. Used by the Settings
@@ -318,11 +340,13 @@ class DisplayMonitor {
     private func runTriggerActions(for profile: TriggerProfile) {
         let obs = OBSWebSocketManager.shared
 
-        print("[OBScene] Trigger fired for '\(profile.name)'! Executing OBS actions...")
+        print("[OBScene] Trigger fired for '\(profile.name)' (\(profile.mode.shortLabel))! Executing OBS actions...")
         ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions (\(profile.name))")
 
+        // Both plug-in and plug-out fire the same notification; consumers can
+        // inspect `profile.mode` if they care.
         NotificationCenter.default.post(
-            name: .displayTriggerFired,
+            name: profile.mode == .plugOut ? .displayUnplugTriggerFired : .displayTriggerFired,
             object: nil,
             userInfo: ["profile": profile]
         )
@@ -363,65 +387,52 @@ class DisplayMonitor {
             )
         }
 
-        func runStartActions() {
-            if profile.startRecording    { obs.startRecording()    }
-            if profile.startStreaming    { obs.startStreaming()    }
-            if profile.startVirtualCam   { obs.startVirtualCam()   }
-            if profile.startReplayBuffer { obs.startReplayBuffer() }
+        func runConfiguredActions() {
+            for action in profile.actions {
+                switch action.kind {
+                case .recording:
+                    if action.mode == .start { obs.startRecording() } else { obs.stopRecording() }
+                case .streaming:
+                    if action.mode == .start { obs.startStreaming() } else { obs.stopStreaming() }
+                case .virtualCam:
+                    if action.mode == .start { obs.startVirtualCam() } else { obs.stopVirtualCam() }
+                case .replayBuffer:
+                    if action.mode == .start { obs.startReplayBuffer() } else { obs.stopReplayBuffer() }
+                case .refreshBrowsers, .refreshOBSBrowserSources:
+                    // Handled after a small delay below so they fire after any
+                    // scene switch has settled.
+                    break
+                }
+            }
+
+            let hasBrowserRefresh = profile.actions.contains { $0.kind == .refreshBrowsers }
+            let hasOBSRefresh = profile.actions.contains { $0.kind == .refreshOBSBrowserSources }
+
+            if hasBrowserRefresh {
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + BrowserRefresher.postTriggerDelay
+                ) {
+                    ActivityLog.shared.log(.info, "Refreshing browser tabs")
+                    BrowserRefresher.refreshAllBrowsers()
+                }
+            }
+
+            if hasOBSRefresh {
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0
+                ) {
+                    ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
+                    obs.refreshAllBrowserSources()
+                }
+            }
         }
 
         runSceneCollection {
             runProfile {
                 runScene {
-                    runStartActions()
-
-                    if profile.refreshBrowsersOnTrigger {
-                        DispatchQueue.main.asyncAfter(
-                            deadline: .now() + BrowserRefresher.postTriggerDelay
-                        ) {
-                            ActivityLog.shared.log(.info, "Refreshing browser tabs")
-                            BrowserRefresher.refreshAllBrowsers()
-                        }
-                    }
-
-                    if profile.refreshOBSBrowserSourcesOnTrigger {
-                        DispatchQueue.main.asyncAfter(
-                            deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0
-                        ) {
-                            ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
-                            obs.refreshAllBrowserSources()
-                        }
-                    }
+                    runConfiguredActions()
                 }
             }
         }
-    }
-
-    private func executeUnplugTrigger(for profile: TriggerProfile) {
-        // Nothing to do if no stop-on-unplug option is enabled.
-        guard profile.stopRecordingOnUnplug
-                || profile.stopStreamingOnUnplug
-                || profile.stopVirtualCamOnUnplug
-                || profile.stopReplayBufferOnUnplug else { return }
-
-        let obs = OBSWebSocketManager.shared
-
-        guard obs.isConnected else {
-            print("[OBScene] Unplug trigger fired for '\(profile.name)' but OBS is not connected")
-            return
-        }
-
-        print("[OBScene] Unplug trigger for '\(profile.name)'! Executing stop actions...")
-
-        NotificationCenter.default.post(
-            name: .displayUnplugTriggerFired,
-            object: nil,
-            userInfo: ["profile": profile]
-        )
-
-        if profile.stopRecordingOnUnplug    { obs.stopRecording()    }
-        if profile.stopStreamingOnUnplug    { obs.stopStreaming()    }
-        if profile.stopVirtualCamOnUnplug   { obs.stopVirtualCam()   }
-        if profile.stopReplayBufferOnUnplug { obs.stopReplayBuffer() }
     }
 }

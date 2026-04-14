@@ -144,22 +144,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleUSBDeviceConnected(_ notification: Notification) {
         guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
 
-        let matchingProfiles = ConfigStore.shared.usbProfilesMatching(deviceName: deviceName)
-        for profile in matchingProfiles {
-            print("[OBScene] USB device '\(deviceName)' matched profile '\(profile.name)'")
+        // Plug-in-mode USB profiles fire their actions when the device appears.
+        let plugInProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: deviceName, mode: .plugIn
+        )
+        for profile in plugInProfiles {
+            print("[OBScene] USB device '\(deviceName)' matched plug-in profile '\(profile.name)'")
             ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)'")
             displayMonitor.scheduleUSBTrigger(for: profile)
+        }
+
+        // Any plug-out-mode profile that's currently armed for this device
+        // should be cancelled — the device never actually disappeared for
+        // long enough to let the trigger fire.
+        let plugOutProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: deviceName, mode: .plugOut
+        )
+        for profile in plugOutProfiles {
+            displayMonitor.cancelUSBPendingTrigger(for: profile)
         }
     }
 
     private func handleUSBDeviceDisconnected(_ notification: Notification) {
         guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
 
-        let matchingProfiles = ConfigStore.shared.usbProfilesMatching(deviceName: deviceName)
-        for profile in matchingProfiles {
-            print("[OBScene] USB device '\(deviceName)' disconnected — unplug trigger for '\(profile.name)'")
+        // Plug-out-mode USB profiles fire their actions when the device goes away.
+        let plugOutProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: deviceName, mode: .plugOut
+        )
+        for profile in plugOutProfiles {
+            print("[OBScene] USB device '\(deviceName)' gone — plug-out profile '\(profile.name)'")
             ActivityLog.shared.log(.info, "USB device '\(deviceName)' disconnected (\(profile.name))")
-            displayMonitor.executeUSBUnplugTrigger(for: profile)
+            displayMonitor.scheduleUSBTrigger(for: profile)
+        }
+
+        // Plug-in-mode profiles whose pending trigger is still waiting out
+        // its delay should be cancelled — the user yanked the cable before
+        // the grace period elapsed.
+        let plugInProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: deviceName, mode: .plugIn
+        )
+        for profile in plugInProfiles {
+            displayMonitor.cancelUSBPendingTrigger(for: profile)
         }
     }
 
@@ -285,10 +311,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Trigger-actions summary across all enabled profiles.
         var actions = Set<String>()
         for profile in enabledProfiles {
-            if profile.startRecording { actions.insert("Record") }
-            if profile.startStreaming { actions.insert("Stream") }
-            if profile.startVirtualCam { actions.insert("Virtual Cam") }
-            if profile.startReplayBuffer { actions.insert("Replay Buffer") }
+            for action in profile.actions {
+                switch action.kind {
+                case .recording:    actions.insert(action.mode == .start ? "Record" : "Stop Rec")
+                case .streaming:    actions.insert(action.mode == .start ? "Stream" : "Stop Stream")
+                case .virtualCam:   actions.insert(action.mode == .start ? "Virtual Cam" : "Stop Virtual Cam")
+                case .replayBuffer: actions.insert(action.mode == .start ? "Replay Buffer" : "Stop Replay")
+                case .refreshBrowsers, .refreshOBSBrowserSources:
+                    break
+                }
+            }
         }
         if actions.isEmpty {
             recordingStatusMenuItem.title = "Trigger actions: scene switch only"
@@ -405,7 +437,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let profile = notification.userInfo?["profile"] as? TriggerProfile
             let profileName = profile?.name ?? "Unknown"
 
-            var parts: [String] = ["Profile: \(profileName)"]
+            var parts: [String] = ["Profile: \(profileName) (\(profile?.mode.shortLabel ?? "plug in"))"]
             if let p = profile {
                 if !p.selectedSceneCollection.isEmpty {
                     parts.append("Collection → \(p.selectedSceneCollection)")
@@ -416,10 +448,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if !p.selectedScene.isEmpty {
                     parts.append("Scene → \(p.selectedScene)")
                 }
-                if p.startRecording { parts.append("Started recording") }
-                if p.startStreaming { parts.append("Started streaming") }
-                if p.startVirtualCam { parts.append("Started virtual camera") }
-                if p.startReplayBuffer { parts.append("Started replay buffer") }
+                parts.append(contentsOf: Self.actionSummaries(for: p))
             }
             let body = parts.joined(separator: "\n")
 
@@ -436,19 +465,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let profile = notification.userInfo?["profile"] as? TriggerProfile
             let profileName = profile?.name ?? "Unknown"
 
-            var parts: [String] = ["Profile: \(profileName)"]
+            var parts: [String] = ["Profile: \(profileName) (plug out)"]
             if let p = profile {
-                if p.stopRecordingOnUnplug { parts.append("Stopped recording") }
-                if p.stopStreamingOnUnplug { parts.append("Stopped streaming") }
-                if p.stopVirtualCamOnUnplug { parts.append("Stopped virtual camera") }
-                if p.stopReplayBufferOnUnplug { parts.append("Stopped replay buffer") }
+                parts.append(contentsOf: Self.actionSummaries(for: p))
             }
             let body = parts.joined(separator: "\n")
             UserNotifier.post(
-                title: "OBScene: trigger stopped",
+                title: "OBScene: plug-out trigger fired",
                 body: body
             )
             self.refreshMenuState()
+        }
+    }
+
+    /// Pretty bullet list of the actions a profile ran, suitable for a macOS
+    /// user-notification body.
+    private static func actionSummaries(for profile: TriggerProfile) -> [String] {
+        return profile.actions.map { action in
+            switch action.kind {
+            case .recording:
+                return action.mode == .start ? "Started recording" : "Stopped recording"
+            case .streaming:
+                return action.mode == .start ? "Started streaming" : "Stopped streaming"
+            case .virtualCam:
+                return action.mode == .start ? "Started virtual camera" : "Stopped virtual camera"
+            case .replayBuffer:
+                return action.mode == .start ? "Started replay buffer" : "Stopped replay buffer"
+            case .refreshBrowsers:
+                return "Refreshed browser tabs"
+            case .refreshOBSBrowserSources:
+                return "Refreshed OBS browser sources"
+            }
         }
     }
 

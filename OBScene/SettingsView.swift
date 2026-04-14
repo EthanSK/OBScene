@@ -235,33 +235,58 @@ struct SettingsView: View {
     }
 
     private func profileNameAndTriggerType(profile: Binding<TriggerProfile>) -> some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 4) {
-                Text("Name:")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                TextField("Profile name", text: profile.name)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 160)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Text("Name:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Profile name", text: profile.name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 160)
+                }
+
+                HStack(spacing: 4) {
+                    Text("Trigger:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: profile.triggerType) {
+                        ForEach(TriggerProfile.TriggerType.allCases, id: \.self) { type in
+                            Label(type.label, systemImage: type.symbol).tag(type)
+                        }
+                    }
+                    .frame(width: 160)
+                }
+
+                Toggle("Enabled", isOn: profile.isEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                Spacer()
             }
 
-            HStack(spacing: 4) {
-                Text("Trigger:")
+            HStack(spacing: 6) {
+                Text("Mode:")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Picker("", selection: profile.triggerType) {
-                    ForEach(TriggerProfile.TriggerType.allCases, id: \.self) { type in
-                        Label(type.label, systemImage: type.symbol).tag(type)
+                Picker("", selection: profile.mode) {
+                    ForEach(ProfileTriggerMode.allCases, id: \.self) { m in
+                        Label(m.label, systemImage: m.symbol).tag(m)
                     }
                 }
-                .frame(width: 160)
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 280)
+
+                Text(profile.wrappedValue.mode == .plugIn
+                     ? "Fires when the trigger condition becomes true."
+                     : "Fires when the trigger condition stops being true.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer()
             }
-
-            Toggle("Enabled", isOn: profile.isEnabled)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-
-            Spacer()
         }
     }
 
@@ -403,58 +428,77 @@ struct SettingsView: View {
     }
 
     private func triggerActionsGroup(profile: Binding<TriggerProfile>) -> some View {
-        GroupBox(label: Label("Trigger Actions", systemImage: "bolt.fill")) {
+        let modeShort = profile.wrappedValue.mode.shortLabel
+        return GroupBox(
+            label: Label("Trigger Actions (on \(modeShort))", systemImage: "bolt.fill")
+        ) {
             VStack(alignment: .leading, spacing: 4) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Recording", isOn: profile.startRecording)
-                    Toggle("Also stop recording on disconnect",
-                           isOn: profile.stopRecordingOnUnplug)
-                        .disabled(!profile.wrappedValue.startRecording)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Streaming", isOn: profile.startStreaming)
-                    Toggle("Also stop streaming on disconnect",
-                           isOn: profile.stopStreamingOnUnplug)
-                        .disabled(!profile.wrappedValue.startStreaming)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Virtual Camera", isOn: profile.startVirtualCam)
-                    Toggle("Also stop virtual camera on disconnect",
-                           isOn: profile.stopVirtualCamOnUnplug)
-                        .disabled(!profile.wrappedValue.startVirtualCam)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Start Replay Buffer", isOn: profile.startReplayBuffer)
-                    Toggle("Also stop replay buffer on disconnect",
-                           isOn: profile.stopReplayBufferOnUnplug)
-                        .disabled(!profile.wrappedValue.startReplayBuffer)
-                        .padding(.leading, 20)
-                }
-
-                Divider().padding(.vertical, 1)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Refresh all browsers", isOn: profile.refreshBrowsersOnTrigger)
-                    Text("Reloads all tabs in Chrome, Safari, Arc, and Firefox")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Refresh OBS browser sources", isOn: profile.refreshOBSBrowserSourcesOnTrigger)
-                    Text("Reloads all browser sources in OBS (chat overlays, widgets, etc.)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                ForEach(TriggerActionKind.displayOrder, id: \.self) { kind in
+                    actionRow(kind: kind, profile: profile)
                 }
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// One row in the Trigger Actions list. Checkbox toggles whether the
+    /// action runs at all; the right-hand picker chooses start vs stop
+    /// (hidden for one-shot refresh actions).
+    private func actionRow(kind: TriggerActionKind,
+                           profile: Binding<TriggerProfile>) -> some View {
+        let isEnabled = profile.wrappedValue.actions.contains(where: { $0.kind == kind })
+        return HStack(spacing: 8) {
+            Toggle(isOn: Binding(
+                get: { isEnabled },
+                set: { newValue in
+                    var updated = profile.wrappedValue.actions
+                    if newValue {
+                        if !updated.contains(where: { $0.kind == kind }) {
+                            // Default mode: .start. Refresh kinds force .start
+                            // in `TriggerActionConfig.init`.
+                            updated.append(TriggerActionConfig(kind: kind, mode: .start))
+                        }
+                    } else {
+                        updated.removeAll { $0.kind == kind }
+                    }
+                    profile.wrappedValue.actions = updated
+                }
+            )) {
+                Label(kind.label, systemImage: kind.symbol)
+                    .labelStyle(.titleAndIcon)
+            }
+            .toggleStyle(.checkbox)
+
+            Spacer(minLength: 8)
+
+            if kind.supportsStop {
+                Picker("", selection: Binding(
+                    get: {
+                        profile.wrappedValue.actions.first(where: { $0.kind == kind })?.mode ?? .start
+                    },
+                    set: { newMode in
+                        var updated = profile.wrappedValue.actions
+                        if let idx = updated.firstIndex(where: { $0.kind == kind }) {
+                            updated[idx].mode = newMode
+                            profile.wrappedValue.actions = updated
+                        }
+                    }
+                )) {
+                    ForEach(TriggerActionMode.allCases, id: \.self) { m in
+                        Text(m.label).tag(m)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 90)
+                .disabled(!isEnabled)
+            } else {
+                // Reserve the same horizontal space so rows line up vertically.
+                Text("Fire")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(width: 90, alignment: .center)
+            }
         }
     }
 
@@ -463,6 +507,8 @@ struct SettingsView: View {
     private func addProfile() {
         var newProfile = TriggerProfile()
         newProfile.name = "Profile \(configStore.config.profiles.count + 1)"
+        newProfile.mode = .plugIn
+        newProfile.migratedToModeSchema = true
         configStore.config.profiles.append(newProfile)
         configStore.config.selectedProfileIndex = configStore.config.profiles.count - 1
     }
