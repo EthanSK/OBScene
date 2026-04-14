@@ -332,6 +332,18 @@ struct SettingsView: View {
                     Text("seconds")
                     Spacer()
                 }
+
+                HStack {
+                    Text("Delay between actions:")
+                    TextField("0", value: profile.delayBetweenActions, formatter: Self.delayBetweenActionsFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                    Text("seconds")
+                    Spacer()
+                }
+                Text("Seconds between each action when the profile fires. Leave at 0 to fire them all at once.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -761,6 +773,19 @@ struct SettingsView: View {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .medium
+        return f
+    }()
+
+    /// Formatter for the per-profile "Delay between actions" field. Accepts
+    /// fractional seconds (e.g. 0.5) with up to 3 decimal places, clamped at
+    /// zero so the user can't enter a negative value.
+    private static let delayBetweenActionsFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimum = 0
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 3
+        f.allowsFloats = true
         return f
     }()
 

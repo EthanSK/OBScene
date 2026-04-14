@@ -36,6 +36,13 @@ class DisplayMonitor {
     /// Per-profile pending trigger work items, keyed by profile ID.
     private var triggerWorkItems: [UUID: DispatchWorkItem] = [:]
 
+    /// Per-profile in-flight inter-action dispatch work items. When a trigger
+    /// fires and `delayBetweenActions > 0`, each action (except the first) is
+    /// dispatched as a separate DispatchWorkItem with a staggered deadline.
+    /// Cancelling the profile's trigger also cancels any still-pending action
+    /// work items from a previous firing.
+    private var inFlightActionWorkItems: [UUID: [DispatchWorkItem]] = [:]
+
     private init() {
         updateDisplayCount()
     }
@@ -174,6 +181,7 @@ class DisplayMonitor {
     private func cancelPendingTrigger(for profileId: UUID) {
         triggerWorkItems[profileId]?.cancel()
         triggerWorkItems.removeValue(forKey: profileId)
+        cancelInFlightActions(for: profileId)
     }
 
     private func cancelAllPendingTriggers() {
@@ -181,6 +189,21 @@ class DisplayMonitor {
             item.cancel()
         }
         triggerWorkItems.removeAll()
+        for (_, items) in inFlightActionWorkItems {
+            for item in items { item.cancel() }
+        }
+        inFlightActionWorkItems.removeAll()
+    }
+
+    /// Cancel any still-pending staggered action dispatches for a profile.
+    /// Safe to call even when the list is empty. Used both when a profile's
+    /// trigger is cancelled mid-flight and at the top of each new firing to
+    /// avoid overlapping dispatches from back-to-back triggers.
+    private func cancelInFlightActions(for profileId: UUID) {
+        if let items = inFlightActionWorkItems[profileId] {
+            for item in items { item.cancel() }
+        }
+        inFlightActionWorkItems.removeValue(forKey: profileId)
     }
 
     /// Schedule a trigger for a USB profile.
@@ -388,7 +411,16 @@ class DisplayMonitor {
         }
 
         func runConfiguredActions() {
-            for action in profile.actions {
+            // Clear any leftover in-flight dispatches from a prior firing of
+            // this profile before scheduling a new batch.
+            self.cancelInFlightActions(for: profile.id)
+
+            let betweenDelay = max(0.0, profile.delayBetweenActions)
+            let profileId = profile.id
+
+            // Closure that actually fires a single action. Kept inline so it
+            // can close over `obs` / `profile` without shared state games.
+            func fire(_ action: TriggerActionConfig) {
                 switch action.kind {
                 case .recording:
                     if action.mode == .start { obs.startRecording() } else { obs.stopRecording() }
@@ -398,31 +430,69 @@ class DisplayMonitor {
                     if action.mode == .start { obs.startVirtualCam() } else { obs.stopVirtualCam() }
                 case .replayBuffer:
                     if action.mode == .start { obs.startReplayBuffer() } else { obs.stopReplayBuffer() }
-                case .refreshBrowsers, .refreshOBSBrowserSources:
-                    // Handled after a small delay below so they fire after any
-                    // scene switch has settled.
-                    break
-                }
-            }
-
-            let hasBrowserRefresh = profile.actions.contains { $0.kind == .refreshBrowsers }
-            let hasOBSRefresh = profile.actions.contains { $0.kind == .refreshOBSBrowserSources }
-
-            if hasBrowserRefresh {
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + BrowserRefresher.postTriggerDelay
-                ) {
+                case .refreshBrowsers:
                     ActivityLog.shared.log(.info, "Refreshing browser tabs")
                     BrowserRefresher.refreshAllBrowsers()
+                case .refreshOBSBrowserSources:
+                    ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
+                    obs.refreshAllBrowserSources()
                 }
             }
 
-            if hasOBSRefresh {
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0
-                ) {
-                    ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
-                    obs.refreshAllBrowserSources()
+            if betweenDelay == 0 {
+                // Back-compat path: preserve the historical behaviour where
+                // the OBS start/stop actions fire immediately and refresh
+                // actions are deferred by a small fixed delay so they land
+                // after any scene switch has settled.
+                for action in profile.actions {
+                    switch action.kind {
+                    case .recording, .streaming, .virtualCam, .replayBuffer:
+                        fire(action)
+                    case .refreshBrowsers, .refreshOBSBrowserSources:
+                        break
+                    }
+                }
+
+                let hasBrowserRefresh = profile.actions.contains { $0.kind == .refreshBrowsers }
+                let hasOBSRefresh = profile.actions.contains { $0.kind == .refreshOBSBrowserSources }
+
+                if hasBrowserRefresh {
+                    let item = DispatchWorkItem {
+                        ActivityLog.shared.log(.info, "Refreshing browser tabs")
+                        BrowserRefresher.refreshAllBrowsers()
+                    }
+                    self.inFlightActionWorkItems[profileId, default: []].append(item)
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + BrowserRefresher.postTriggerDelay,
+                        execute: item
+                    )
+                }
+
+                if hasOBSRefresh {
+                    let item = DispatchWorkItem {
+                        ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
+                        obs.refreshAllBrowserSources()
+                    }
+                    self.inFlightActionWorkItems[profileId, default: []].append(item)
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0,
+                        execute: item
+                    )
+                }
+            } else {
+                // Staggered path: first action fires immediately, each
+                // subsequent action is offset by `index * delayBetweenActions`.
+                for (index, action) in profile.actions.enumerated() {
+                    if index == 0 {
+                        fire(action)
+                    } else {
+                        let item = DispatchWorkItem { fire(action) }
+                        self.inFlightActionWorkItems[profileId, default: []].append(item)
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + Double(index) * betweenDelay,
+                            execute: item
+                        )
+                    }
                 }
             }
         }

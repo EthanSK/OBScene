@@ -299,6 +299,12 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     // Trigger delay
     var triggerDelay: Int = 5
 
+    /// Delay (seconds) between successive actions when the profile fires. The
+    /// first action fires immediately; each subsequent action is offset by
+    /// `index * delayBetweenActions`. Defaults to 0 so existing profiles keep
+    /// their original all-at-once behaviour.
+    var delayBetweenActions: Double = 0.0
+
     init() {}
 
     // Coding keys — we persist the legacy per-action flags under their
@@ -318,6 +324,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         case refreshBrowsersOnTrigger, refreshOBSBrowserSourcesOnTrigger
         case migratedToModeSchema
         case triggerDelay
+        case delayBetweenActions
     }
 
     // Custom decoder for forward compatibility — new fields fall back to
@@ -350,6 +357,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         refreshOBSBrowserSourcesOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshOBSBrowserSourcesOnTrigger) ?? refreshOBSBrowserSourcesOnTrigger
         migratedToModeSchema = try container.decodeIfPresent(Bool.self, forKey: .migratedToModeSchema) ?? migratedToModeSchema
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
+        delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? delayBetweenActions
     }
 
     /// Convenience: returns the config for a given action kind in this
