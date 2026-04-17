@@ -32,6 +32,49 @@ struct SettingsView: View {
     /// a real device name can't collide with.
     private static let customDeviceSentinel = "__obscene_custom_usb_name__"
 
+    /// Sentinel tag for the "Select a device…" / "(No USB devices detected)"
+    /// placeholder row. Kept distinct from "" so we can early-return in the
+    /// picker setter and avoid writing it to `usbDeviceName`, and kept
+    /// distinct from any plausible real device name or volume label.
+    private static let placeholderDeviceTag = "__obscene_usb_placeholder__"
+    private static let deviceTagPrefix = "__obscene_usb_device__:"
+
+    /// Map a stored `usbDeviceName` to the exact tag SwiftUI will find on one
+    /// of the device rows. Device rows use internal per-device tags so volume
+    /// labels that collide with each other or with sentinels don't confuse the
+    /// Picker; the binding setter maps those tags back to stored labels/names.
+    ///
+    /// Search order:
+    ///   1. Exact match on the current stored row value.
+    ///   2. Some device's `volumeLabels` contains the stored name.
+    ///   3. Some device's `name` equals the stored name (so old configs with
+    ///      the raw "USB Flash Disk" hardware name find the current row).
+    ///   4. No match -> return the placeholder sentinel, forcing the user to
+    ///      re-pick.
+    fileprivate static func tagForDevice(currentName: String,
+                                         devices: [USBDeviceInfo]) -> String {
+        if let storedValueMatch = devices.first(where: { storedName(for: $0) == currentName }) {
+            return pickerTag(for: storedValueMatch)
+        }
+        if let labelMatch = devices.first(where: { $0.volumeLabels.contains(currentName) }) {
+            return pickerTag(for: labelMatch)
+        }
+        if let nameMatch = devices.first(where: { $0.name == currentName }) {
+            return pickerTag(for: nameMatch)
+        }
+        return placeholderDeviceTag
+    }
+
+    /// Internal SwiftUI tag for a concrete device row; never store this in
+    /// config because trigger matching expects the user-facing label/name.
+    fileprivate static func pickerTag(for device: USBDeviceInfo) -> String {
+        return deviceTagPrefix + device.id
+    }
+
+    fileprivate static func storedName(for device: USBDeviceInfo) -> String {
+        return device.volumeLabels.first ?? device.name
+    }
+
     var body: some View {
         ViewThatFits(in: .horizontal) {
             twoColumnLayout
@@ -51,6 +94,9 @@ struct SettingsView: View {
             refreshConnectedUSBDevices()
         }
         .onReceive(NotificationCenter.default.publisher(for: .usbDeviceDisconnected)) { _ in
+            refreshConnectedUSBDevices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .usbDeviceVolumeLabelsResolved)) { _ in
             refreshConnectedUSBDevices()
         }
     }
@@ -380,25 +426,28 @@ struct SettingsView: View {
         //   1. If the user explicitly chose "Custom name…" in this session, stay
         //      in custom mode (tracked in `customUSBModeProfileIDs`).
         //   2. Otherwise, if the stored `usbDeviceName` is non-empty and does NOT
-        //      match any currently-connected device, assume the saved value is
-        //      a free-text entry for a device that isn't plugged in right now.
+        //      match any currently-connected device (by hardware name OR by any
+        //      mounted volume label), assume the saved value is free-text for a
+        //      device that isn't plugged in right now.
         //   3. Otherwise (empty, or matches a connected device), show the
-        //      device picker with the matching device selected (or no selection
-        //      if empty).
+        //      device picker with the matching device selected (or the
+        //      placeholder row if empty).
         let profileID = profile.wrappedValue.id
         let currentName = profile.wrappedValue.usbDeviceName
-        let matchesConnectedDevice = connectedUSBDevices.contains { $0.name == currentName }
+        let matchesConnectedDevice = connectedUSBDevices.contains { device in
+            device.name == currentName || device.volumeLabels.contains(currentName)
+        }
         let isCustomMode = customUSBModeProfileIDs.contains(profileID)
             || (!currentName.isEmpty && !matchesConnectedDevice)
 
         let pickerSelection = Binding<String>(
             get: {
                 if isCustomMode { return Self.customDeviceSentinel }
-                // Empty name maps to the empty-tag placeholder when no devices
-                // are connected; when devices ARE connected but none is picked,
-                // also use empty to avoid an invalid-selection warning (the
-                // placeholder row is always present).
-                return currentName
+                if currentName.isEmpty { return Self.placeholderDeviceTag }
+                // Round-trip the stored label/name into the current row's
+                // internal per-device tag.
+                return Self.tagForDevice(currentName: currentName,
+                                         devices: connectedUSBDevices)
             },
             set: { newValue in
                 if newValue == Self.customDeviceSentinel {
@@ -408,10 +457,23 @@ struct SettingsView: View {
                     customUSBModeProfileIDs.insert(profileID)
                     return
                 }
-                // User picked an actual device (or the empty placeholder).
-                // Leave custom mode and write the device name through.
+                if newValue == Self.placeholderDeviceTag {
+                    // The placeholder is `.disabled(true)` so this shouldn't
+                    // happen, but if some accessibility path triggers it we
+                    // MUST NOT overwrite `usbDeviceName` with the sentinel.
+                    return
+                }
+                guard let selectedDevice = connectedUSBDevices.first(where: {
+                    Self.pickerTag(for: $0) == newValue
+                }) else {
+                    // Unknown picker tags are UI-only state; don't persist
+                    // them into the trigger matcher.
+                    return
+                }
+                // User picked an actual device. Leave custom mode and write
+                // the volume label if present, else the hardware name.
                 customUSBModeProfileIDs.remove(profileID)
-                profile.wrappedValue.usbDeviceName = newValue
+                profile.wrappedValue.usbDeviceName = Self.storedName(for: selectedDevice)
             }
         )
 
@@ -419,15 +481,24 @@ struct SettingsView: View {
             HStack {
                 Text("USB device:")
                 Picker("", selection: pickerSelection) {
-                    // Always include an empty-tag placeholder so a blank
+                    // Always include a placeholder row so a blank
                     // `usbDeviceName` has a valid selection target and SwiftUI
-                    // doesn't warn about an unmatched picker selection.
+                    // doesn't warn about an unmatched picker selection. The
+                    // row is `.disabled` so the user can't actually pick it.
                     if connectedUSBDevices.isEmpty {
-                        Text("(No USB devices detected)").tag("")
+                        Text("(No USB devices detected)")
+                            .tag(Self.placeholderDeviceTag)
+                            .disabled(true)
                     } else {
-                        Text("Select a device…").tag("")
+                        Text("Select a device…")
+                            .tag(Self.placeholderDeviceTag)
+                            .disabled(true)
                         ForEach(connectedUSBDevices, id: \.id) { device in
-                            Text(device.displayLabel).tag(device.name)
+                            // Use an internal tag so duplicate labels don't
+                            // destabilize SwiftUI selection; the setter stores
+                            // the user-recognisable label/name instead.
+                            Text(device.displayLabel)
+                                .tag(Self.pickerTag(for: device))
                         }
                     }
                     Divider()

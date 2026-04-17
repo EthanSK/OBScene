@@ -664,12 +664,17 @@ class ConfigStore: ObservableObject {
     }
 
     /// Returns all enabled USB-trigger profiles of the given mode whose
-    /// device name matches.
+    /// hardware name OR any mounted volume label matches the user-configured
+    /// `usbDeviceName` (case-insensitive substring).
     func usbProfilesMatching(deviceName: String,
+                             volumeLabels: [String] = [],
                              mode: ProfileTriggerMode) -> [TriggerProfile] {
-        return enabledProfiles(ofType: .usbDevice, mode: mode).filter {
-            !$0.usbDeviceName.isEmpty &&
-            deviceName.localizedCaseInsensitiveContains($0.usbDeviceName)
+        let candidates = [deviceName] + volumeLabels
+        return enabledProfiles(ofType: .usbDevice, mode: mode).filter { profile in
+            guard !profile.usbDeviceName.isEmpty else { return false }
+            return candidates.contains { candidate in
+                candidate.localizedCaseInsensitiveContains(profile.usbDeviceName)
+            }
         }
     }
 }

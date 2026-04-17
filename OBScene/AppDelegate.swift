@@ -21,6 +21,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// remove exactly the registrations we added (and only those).
     private var notificationObservers: [NSObjectProtocol] = []
 
+    /// Per-device record of profile IDs whose triggers we've already
+    /// scheduled for the current plug-in cycle. Keyed by the opaque
+    /// `deviceKey` the USBMonitor stamps on each connect notification.
+    /// Used by the volume-label follow-up handler to avoid re-scheduling
+    /// profiles that already matched on hardware name at connect time
+    /// (which would otherwise double-fire via substring matching).
+    /// Cleared on `.usbDeviceDisconnected`.
+    private var usbFiredPlugInProfiles: [String: Set<UUID>] = [:]
+    private var usbFiredPlugOutCancellations: [String: Set<UUID>] = [:]
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // If OBSCENE_RENDER_SETTINGS=<path> is set, render the SettingsView
         // to a PNG offscreen and exit. Used by the release screenshot script
@@ -88,6 +98,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        // Supplementary notification when DiskArbitration resolves volume
+        // labels asynchronously after a USB mass-storage device appeared.
+        // Matches ONLY against volume labels to avoid double-firing profiles
+        // that already matched on the hardware name at plug-in time.
+        notificationObservers.append(
+            center.addObserver(forName: .usbDeviceVolumeLabelsResolved, object: nil, queue: .main) { [weak self] note in
+                self?.handleUSBVolumeLabelsResolved(note)
+            }
+        )
+
         // Refresh menu state once up-front.
         refreshMenuState()
 
@@ -143,37 +163,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleUSBDeviceConnected(_ notification: Notification) {
         guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
+        let volumeLabels = (notification.userInfo?["volumeLabels"] as? [String]) ?? []
+        let deviceKey = (notification.userInfo?["deviceKey"] as? String) ?? "name:\(deviceName)"
 
         // Plug-in-mode USB profiles fire their actions when the device appears.
         let plugInProfiles = ConfigStore.shared.usbProfilesMatching(
-            deviceName: deviceName, mode: .plugIn
+            deviceName: deviceName, volumeLabels: volumeLabels, mode: .plugIn
         )
+        var firedIDs = usbFiredPlugInProfiles[deviceKey] ?? []
         for profile in plugInProfiles {
-            print("[OBScene] USB device '\(deviceName)' matched plug-in profile '\(profile.name)'")
+            print("[OBScene] USB device '\(deviceName)' (labels=\(volumeLabels)) matched plug-in profile '\(profile.name)'")
             ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)'")
             displayMonitor.scheduleUSBTrigger(for: profile)
+            firedIDs.insert(profile.id)
         }
+        usbFiredPlugInProfiles[deviceKey] = firedIDs
 
         // Any plug-out-mode profile that's currently armed for this device
         // should be cancelled — the device never actually disappeared for
         // long enough to let the trigger fire.
         let plugOutProfiles = ConfigStore.shared.usbProfilesMatching(
-            deviceName: deviceName, mode: .plugOut
+            deviceName: deviceName, volumeLabels: volumeLabels, mode: .plugOut
         )
+        var cancelledIDs = usbFiredPlugOutCancellations[deviceKey] ?? []
         for profile in plugOutProfiles {
             displayMonitor.cancelUSBPendingTrigger(for: profile)
+            cancelledIDs.insert(profile.id)
         }
+        usbFiredPlugOutCancellations[deviceKey] = cancelledIDs
+    }
+
+    /// Follow-up handler: volume labels for a previously-connected USB
+    /// device have now been resolved by DiskArbitration. Fires trigger
+    /// matching ONLY against the labels and explicitly excludes profiles
+    /// already scheduled at the initial `.usbDeviceConnected` notification
+    /// (by substring match on the hardware name, which can overlap with a
+    /// label substring match).
+    private func handleUSBVolumeLabelsResolved(_ notification: Notification) {
+        guard let deviceName = notification.userInfo?["deviceName"] as? String,
+              let volumeLabels = notification.userInfo?["volumeLabels"] as? [String],
+              !volumeLabels.isEmpty
+        else { return }
+        let deviceKey = (notification.userInfo?["deviceKey"] as? String) ?? "name:\(deviceName)"
+
+        let alreadyFired = usbFiredPlugInProfiles[deviceKey] ?? []
+        let alreadyCancelled = usbFiredPlugOutCancellations[deviceKey] ?? []
+
+        // Pass an empty deviceName so the matcher's candidate list is the
+        // volume labels alone.
+        let plugInProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: "", volumeLabels: volumeLabels, mode: .plugIn
+        ).filter { !alreadyFired.contains($0.id) }
+
+        var firedIDs = alreadyFired
+        for profile in plugInProfiles {
+            print("[OBScene] USB device '\(deviceName)' (late labels=\(volumeLabels)) matched plug-in profile '\(profile.name)'")
+            ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)' (via volume label)")
+            displayMonitor.scheduleUSBTrigger(for: profile)
+            firedIDs.insert(profile.id)
+        }
+        usbFiredPlugInProfiles[deviceKey] = firedIDs
+
+        let plugOutProfiles = ConfigStore.shared.usbProfilesMatching(
+            deviceName: "", volumeLabels: volumeLabels, mode: .plugOut
+        ).filter { !alreadyCancelled.contains($0.id) }
+
+        var cancelledIDs = alreadyCancelled
+        for profile in plugOutProfiles {
+            displayMonitor.cancelUSBPendingTrigger(for: profile)
+            cancelledIDs.insert(profile.id)
+        }
+        usbFiredPlugOutCancellations[deviceKey] = cancelledIDs
     }
 
     private func handleUSBDeviceDisconnected(_ notification: Notification) {
         guard let deviceName = notification.userInfo?["deviceName"] as? String else { return }
+        let volumeLabels = (notification.userInfo?["volumeLabels"] as? [String]) ?? []
+        let deviceKey = (notification.userInfo?["deviceKey"] as? String) ?? "name:\(deviceName)"
 
         // Plug-out-mode USB profiles fire their actions when the device goes away.
         let plugOutProfiles = ConfigStore.shared.usbProfilesMatching(
-            deviceName: deviceName, mode: .plugOut
+            deviceName: deviceName, volumeLabels: volumeLabels, mode: .plugOut
         )
         for profile in plugOutProfiles {
-            print("[OBScene] USB device '\(deviceName)' gone — plug-out profile '\(profile.name)'")
+            print("[OBScene] USB device '\(deviceName)' (labels=\(volumeLabels)) gone — plug-out profile '\(profile.name)'")
             ActivityLog.shared.log(.info, "USB device '\(deviceName)' disconnected (\(profile.name))")
             displayMonitor.scheduleUSBTrigger(for: profile)
         }
@@ -182,11 +255,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // its delay should be cancelled — the user yanked the cable before
         // the grace period elapsed.
         let plugInProfiles = ConfigStore.shared.usbProfilesMatching(
-            deviceName: deviceName, mode: .plugIn
+            deviceName: deviceName, volumeLabels: volumeLabels, mode: .plugIn
         )
         for profile in plugInProfiles {
             displayMonitor.cancelUSBPendingTrigger(for: profile)
         }
+
+        // Device is gone — its per-device "already fired" bookkeeping is
+        // no longer relevant.
+        usbFiredPlugInProfiles.removeValue(forKey: deviceKey)
+        usbFiredPlugOutCancellations.removeValue(forKey: deviceKey)
     }
 
     // MARK: - Menu bar
