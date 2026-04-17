@@ -439,12 +439,47 @@ class DisplayMonitor {
                 }
             }
 
+            // Classify an action into one of three execution buckets. Ordering
+            // matters because if a user puts "Start Recording" as action #1
+            // and e.g. a refresh / virtual-cam toggle as action #2, the
+            // recording would otherwise capture the wrong initial state.
+            // We always fire:
+            //   1. stops first  (let any pre-existing recording/stream/replay
+            //                    buffer wrap up before we change state),
+            //   2. non-recording actions in user order,
+            //   3. recording-family STARTS last (recording, streaming, replay
+            //      buffer — so the scene is fully settled when capture begins).
+            // Within each bucket we preserve the user's relative order, and
+            // the stagger index for `delayBetweenActions` is the new flat
+            // position (not per-bucket), so the counter is not reset.
+            enum ActionBucket { case stop, middle, recordingStart }
+            func bucket(for action: TriggerActionConfig) -> ActionBucket {
+                switch action.kind {
+                case .recording, .streaming, .replayBuffer:
+                    return action.mode == .start ? .recordingStart : .stop
+                case .virtualCam:
+                    // Virtual cam isn't a "capture to disk / to wire" action,
+                    // so treat its start as a middle-bucket toggle and its
+                    // stop like any other stop.
+                    return action.mode == .start ? .middle : .stop
+                case .refreshBrowsers, .refreshOBSBrowserSources:
+                    return .middle
+                }
+            }
+
+            let stops = profile.actions.filter { bucket(for: $0) == .stop }
+            let middles = profile.actions.filter { bucket(for: $0) == .middle }
+            let recordingStarts = profile.actions.filter { bucket(for: $0) == .recordingStart }
+            let orderedActions = stops + middles + recordingStarts
+
             if betweenDelay == 0 {
                 // Back-compat path: preserve the historical behaviour where
                 // the OBS start/stop actions fire immediately and refresh
                 // actions are deferred by a small fixed delay so they land
-                // after any scene switch has settled.
-                for action in profile.actions {
+                // after any scene switch has settled. Reordering only affects
+                // the OBS start/stop actions within this synchronous burst —
+                // refresh actions still get their own post-trigger delay.
+                for action in orderedActions {
                     switch action.kind {
                     case .recording, .streaming, .virtualCam, .replayBuffer:
                         fire(action)
@@ -482,7 +517,10 @@ class DisplayMonitor {
             } else {
                 // Staggered path: first action fires immediately, each
                 // subsequent action is offset by `index * delayBetweenActions`.
-                for (index, action) in profile.actions.enumerated() {
+                // `index` is the position in the reordered flat list, so the
+                // stops → middles → recordingStarts ordering is honoured and
+                // the stagger counter is never reset per bucket.
+                for (index, action) in orderedActions.enumerated() {
                     if index == 0 {
                         fire(action)
                     } else {
