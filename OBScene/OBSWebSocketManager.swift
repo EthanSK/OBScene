@@ -99,6 +99,34 @@ struct AnyCodable: Codable {
 
 // MARK: - OBS WebSocket Manager
 
+/// High-level connection state consumed by the UI. The manager keeps a live
+/// auto-reconnect loop running whenever we're not connected, so the UI needs
+/// to be able to tell "actively retrying" apart from "idle, no connection
+/// ever attempted" apart from "connected".
+enum OBSConnectionState: Equatable {
+    /// Nothing has been configured yet / connect has never been called.
+    case idle
+    /// Identify handshake complete, we're talking to OBS.
+    case connected
+    /// Not connected, waiting for a scheduled reconnect attempt.
+    /// `nextAttemptAt` is the wall-clock date the next connect will fire;
+    /// `delay` is the full interval we're waiting so the UI can compute
+    /// a "Retrying in Ns…" countdown.
+    case retrying(nextAttemptAt: Date, delay: TimeInterval)
+    /// Not connected and not currently scheduled to retry. This is a
+    /// transient state — once `disconnected` is entered we immediately
+    /// schedule a retry and transition to `.retrying`. The UI should render
+    /// this as a generic "disconnected" badge.
+    case disconnected(message: String?)
+
+    /// Helper: treats both `.retrying` and `.disconnected` as "not connected"
+    /// for call sites that don't care about the sub-state.
+    var isConnected: Bool {
+        if case .connected = self { return true }
+        return false
+    }
+}
+
 class OBSWebSocketManager: ObservableObject {
     static let shared = OBSWebSocketManager()
 
@@ -110,6 +138,35 @@ class OBSWebSocketManager: ObservableObject {
     @Published var currentProfile: String = ""
     @Published var currentScene: String = ""
     @Published var connectionError: String?
+
+    /// Structured connection state for the UI (status pill). Kept in sync
+    /// with the legacy `isConnected` / `connectionError` fields — any change
+    /// to this property posts `.obsConnectionChanged` on the main queue.
+    @Published var connectionState: OBSConnectionState = .idle
+
+    // MARK: Auto-reconnect
+
+    /// Exponential-backoff schedule for auto-reconnect, in seconds. After the
+    /// last entry we stay at that cap forever (until a successful connect
+    /// resets the index).
+    private let reconnectBackoffSchedule: [TimeInterval] = [2, 5, 15, 30, 60]
+
+    /// Index into `reconnectBackoffSchedule` for the next retry. Reset to 0
+    /// on every successful Identify and on every manual `reconnectNow()`.
+    private var reconnectAttemptIndex: Int = 0
+
+    /// Most-recent host/port/password used to connect. The auto-reconnect
+    /// loop dials these; `nil` means nothing is configured yet (idle state).
+    private var lastConnectParams: (host: String, port: Int, password: String)?
+
+    /// Pending DispatchWorkItem for the next scheduled reconnect. We keep it
+    /// so `reconnectNow()` and `disconnect()` can cancel it.
+    private var pendingReconnectWorkItem: DispatchWorkItem?
+
+    /// If true, the user has explicitly called `disconnect()` (e.g. app
+    /// terminating) and we should NOT schedule further reconnect attempts.
+    /// Reset on the next explicit `connect(...)` call.
+    private var autoReconnectSuppressed: Bool = false
 
     // Pending request callbacks, with the timestamp at which they were
     // registered so we can time them out and avoid leaking forever if OBS
@@ -143,6 +200,8 @@ class OBSWebSocketManager: ObservableObject {
     deinit {
         callbackCleanupTimer?.invalidate()
         callbackCleanupTimer = nil
+        pendingReconnectWorkItem?.cancel()
+        pendingReconnectWorkItem = nil
         webSocket?.cancel(with: .normalClosure, reason: nil)
         webSocket = nil
         session?.invalidateAndCancel()
@@ -151,13 +210,31 @@ class OBSWebSocketManager: ObservableObject {
 
     // MARK: - Connection
 
+    /// Kick off a connection attempt. Remembers the params so the
+    /// auto-reconnect loop can re-dial after a drop.
     func connect(host: String, port: Int, password: String) {
-        disconnect()
+        lastConnectParams = (host: host, port: port, password: password)
+        autoReconnectSuppressed = false
+        reconnectAttemptIndex = 0
+        cancelPendingReconnect()
+        performConnect(host: host, port: port, password: password)
+    }
+
+    /// Tear down any current socket and open a fresh one using the supplied
+    /// credentials. Does NOT touch `lastConnectParams` / backoff state — that
+    /// lets the auto-reconnect loop reuse this method without resetting the
+    /// "manual connect" bookkeeping.
+    private func performConnect(host: String, port: Int, password: String) {
+        tearDownSocket()
         self.password = password
 
         let urlString = "ws://\(host):\(port)"
         guard let url = URL(string: urlString) else {
-            connectionError = "Invalid URL: \(urlString)"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionError = "Invalid URL: \(urlString)"
+                self?.publishState(.disconnected(message: "Invalid URL: \(urlString)"))
+            }
+            scheduleReconnect()
             return
         }
 
@@ -167,29 +244,50 @@ class OBSWebSocketManager: ObservableObject {
         webSocket = newTask
         newTask.resume()
 
-        connectionError = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionError = nil
+        }
         receiveMessage(on: newTask)
     }
 
+    /// User-initiated disconnect — suppresses auto-reconnect until the next
+    /// explicit `connect()`. Called from `applicationWillTerminate`.
     func disconnect() {
-        // Tear down the existing task/session and drop our references BEFORE
-        // notifying observers. This way any in-flight `receiveMessage` closure
-        // will see that `webSocket` no longer matches the task it captured and
-        // bail out instead of recursing.
-        if let task = webSocket {
-            task.cancel(with: .normalClosure, reason: nil)
-        }
-        webSocket = nil
-        session?.invalidateAndCancel()
-        session = nil
-
-        // Fail any pending callbacks so callers don't hang forever.
+        autoReconnectSuppressed = true
+        cancelPendingReconnect()
+        tearDownSocket()
         failAllPendingCallbacks()
 
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
-            NotificationCenter.default.post(name: .obsConnectionChanged, object: nil)
+            self?.publishState(.idle)
         }
+    }
+
+    /// Manually trigger an immediate reconnect attempt and reset the backoff
+    /// schedule. Called from the "Reconnect now" pill button and the menu
+    /// bar's "Reconnect to OBS" item.
+    func reconnectNow() {
+        guard let params = lastConnectParams else { return }
+        autoReconnectSuppressed = false
+        reconnectAttemptIndex = 0
+        cancelPendingReconnect()
+        performConnect(host: params.host, port: params.port, password: params.password)
+    }
+
+    /// Tear down the current webSocket/session pair without touching state
+    /// that callers may still need (auto-reconnect bookkeeping, published
+    /// state). Shared by `disconnect()` and `performConnect()`.
+    private func tearDownSocket() {
+        // Drop refs BEFORE cancelling so any in-flight `receiveMessage`
+        // closure sees `webSocket !== task` and bails out instead of
+        // recursing against the dead socket.
+        let oldTask = webSocket
+        let oldSession = session
+        webSocket = nil
+        session = nil
+        oldTask?.cancel(with: .normalClosure, reason: nil)
+        oldSession?.invalidateAndCancel()
     }
 
     // MARK: - Message Handling
@@ -225,13 +323,22 @@ class OBSWebSocketManager: ObservableObject {
 
             case .failure(let error):
                 print("[OBScene] WebSocket error: \(error)")
-                // Don't recurse on error — let reconnection logic / the user
+                // Don't recurse on error — let the auto-reconnect loop
                 // re-establish the connection. Recursing here would just spin
                 // on a dead socket.
-                DispatchQueue.main.async {
+                //
+                // Guard against double-handling: if `webSocket` has already
+                // been replaced (e.g. manual reconnect), the new loop will
+                // own the state.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    // Only react to errors from the *current* task. Older
+                    // tasks that were swapped out during a reconnect will
+                    // also emit a failure here and we want to ignore those.
+                    guard self.webSocket === task || self.webSocket == nil else { return }
                     self.isConnected = false
                     self.connectionError = error.localizedDescription
-                    NotificationCenter.default.post(name: .obsConnectionChanged, object: nil)
+                    self.scheduleReconnect(errorMessage: error.localizedDescription)
                 }
             }
         }
@@ -287,10 +394,15 @@ class OBSWebSocketManager: ObservableObject {
 
     private func handleIdentified() {
         print("[OBScene] Connected to OBS WebSocket")
+        // Successful handshake — reset backoff and cancel any scheduled
+        // reconnect so we don't bounce the freshly-established socket.
+        reconnectAttemptIndex = 0
+        cancelPendingReconnect()
+
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = true
             self?.connectionError = nil
-            NotificationCenter.default.post(name: .obsConnectionChanged, object: nil)
+            self?.publishState(.connected)
         }
 
         // Fetch initial state
@@ -358,6 +470,76 @@ class OBSWebSocketManager: ObservableObject {
         for (_, pending) in all {
             pending.callback(nil)
         }
+    }
+
+    // MARK: - Auto-reconnect
+
+    /// Publish a new connection state on the main queue and broadcast the
+    /// legacy `.obsConnectionChanged` notification so pre-existing observers
+    /// (menu bar, etc.) pick it up too.
+    private func publishState(_ newState: OBSConnectionState) {
+        // Must be called on main because `@Published` dispatches to
+        // whichever queue writes happen on, and the UI observes from main.
+        assert(Thread.isMainThread, "publishState must be called on the main queue")
+        connectionState = newState
+        NotificationCenter.default.post(name: .obsConnectionChanged, object: nil)
+    }
+
+    /// Figure out how long to wait before the next reconnect. Caps at the
+    /// last entry of `reconnectBackoffSchedule` forever until a successful
+    /// connect resets the index.
+    private func currentBackoffDelay() -> TimeInterval {
+        let idx = min(reconnectAttemptIndex, reconnectBackoffSchedule.count - 1)
+        return reconnectBackoffSchedule[idx]
+    }
+
+    /// Cancel any scheduled reconnect DispatchWorkItem. Safe to call when
+    /// nothing is pending.
+    private func cancelPendingReconnect() {
+        pendingReconnectWorkItem?.cancel()
+        pendingReconnectWorkItem = nil
+    }
+
+    /// Schedule the next reconnect attempt using the current backoff delay,
+    /// then advance the backoff index for the one after. Does nothing if the
+    /// user has explicitly disconnected or if we never had connect params.
+    private func scheduleReconnect(errorMessage: String? = nil) {
+        guard !autoReconnectSuppressed else { return }
+        guard lastConnectParams != nil else {
+            DispatchQueue.main.async { [weak self] in
+                self?.publishState(.disconnected(message: errorMessage))
+            }
+            return
+        }
+
+        let delay = currentBackoffDelay()
+        reconnectAttemptIndex += 1
+
+        let nextAt = Date().addingTimeInterval(delay)
+        DispatchQueue.main.async { [weak self] in
+            self?.publishState(.retrying(nextAttemptAt: nextAt, delay: delay))
+        }
+
+        // Clear any prior pending work item before installing a new one so
+        // we don't end up with two racing reconnects (e.g. if both the
+        // receive-loop error handler and a URLSession delegate callback
+        // call this within the same tick).
+        cancelPendingReconnect()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // If someone called disconnect() / reconnectNow() in the meantime,
+            // the cancelled flag will be set. Bail out cleanly.
+            if self.pendingReconnectWorkItem?.isCancelled ?? true {
+                return
+            }
+            guard !self.autoReconnectSuppressed else { return }
+            guard let latest = self.lastConnectParams else { return }
+            print("[OBScene] Auto-reconnect attempt (backoff index \(self.reconnectAttemptIndex))")
+            self.performConnect(host: latest.host, port: latest.port, password: latest.password)
+        }
+        pendingReconnectWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Authentication

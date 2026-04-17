@@ -972,27 +972,7 @@ struct SettingsView: View {
     }
 
     private var connectionStatusView: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(obsManager.isConnected ? Color.green : (obsManager.connectionError != nil ? Color.orange : Color.red))
-                .frame(width: 8, height: 8)
-            if let error = obsManager.connectionError, !error.isEmpty {
-                Text("Error: \(error)")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .help(error)
-            } else if obsManager.isConnected {
-                Text("Connected")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } else {
-                Text("Disconnected")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
+        OBSConnectionStatusPill(obsManager: obsManager)
     }
 
     private func connectToOBS() {

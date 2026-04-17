@@ -277,21 +277,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Recompute all of the live status menu items from current singletons.
     private func refreshMenuState() {
         let config = configStore.config
-        let connected = obsManager.isConnected
 
-        // OBS connection + scene
-        if connected {
+        // OBS connection + scene — source-of-truth is the structured
+        // `connectionState` so the menu mirrors the status pill.
+        switch obsManager.connectionState {
+        case .connected:
             obsStatusMenuItem.title = "OBS: Connected"
             if !obsManager.currentScene.isEmpty {
                 sceneMenuItem.title = "Scene: \(obsManager.currentScene)"
             } else {
                 sceneMenuItem.title = "Scene: —"
             }
-        } else if let error = obsManager.connectionError, !error.isEmpty {
-            obsStatusMenuItem.title = "OBS: \(truncate(error, limit: 50))"
+        case .retrying(let nextAttemptAt, _):
+            let remaining = max(0, Int(ceil(nextAttemptAt.timeIntervalSinceNow)))
+            obsStatusMenuItem.title = "OBS: Retrying in \(remaining)s…"
             sceneMenuItem.title = "Scene: —"
-        } else {
-            obsStatusMenuItem.title = "OBS: Disconnected"
+        case .disconnected(let message):
+            if let message = message, !message.isEmpty {
+                obsStatusMenuItem.title = "OBS: \(truncate(message, limit: 50))"
+            } else {
+                obsStatusMenuItem.title = "OBS: Disconnected"
+            }
+            sceneMenuItem.title = "Scene: —"
+        case .idle:
+            obsStatusMenuItem.title = "OBS: Not configured"
             sceneMenuItem.title = "Scene: —"
         }
 
@@ -369,7 +378,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reconnectOBS() {
-        connectToOBSIfConfigured()
+        // Prefer the fast path: reset backoff + dial immediately using
+        // whatever params the manager already has. Falls back to a full
+        // `connect()` if the user hasn't set up OBS yet this session.
+        if obsManager.connectionState == .idle {
+            connectToOBSIfConfigured()
+        } else {
+            obsManager.reconnectNow()
+        }
     }
 
     @objc private func showAbout() {
