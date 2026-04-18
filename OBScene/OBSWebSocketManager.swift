@@ -897,9 +897,20 @@ class OBSWebSocketManager: ObservableObject {
         config.addsToRecentItems = false
         config.hides = false
 
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { runningApp, error in
             if let error = error {
                 print("[OBScene] Failed to launch OBS: \(error)")
+                return
+            }
+            // Kick off the Safe Mode dialog watcher (no-op if OBS didn't
+            // unclean-shutdown last run). OBS has no CLI flag to suppress
+            // the Safe Mode modal as of 32.x — we AX-click "Launch Normally"
+            // on the user's behalf so trigger actions don't stall behind a
+            // blocking dialog.
+            if let app = runningApp {
+                DispatchQueue.main.async {
+                    SafeModeDialogDismisser.shared.watchForDialog(runningApp: app)
+                }
             }
         }
         return true
