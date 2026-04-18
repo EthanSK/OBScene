@@ -10,8 +10,6 @@ Dock into your battlestation and OBScene takes care of the boring bits: it switc
   <img src="Resources/screenshot-menubar.png" alt="OBScene menu bar dropdown" width="260">
   &nbsp;
   <img src="Resources/screenshot-settings.png" alt="OBScene settings window showing a Display-triggered profile with plug-in/plug-out mode, trigger delay, and per-action delay" width="440">
-  &nbsp;
-  <img src="Resources/screenshot-usb.png" alt="OBScene settings window showing a USB-triggered profile with the USB device picker open" width="440">
 </div>
 
 ![macOS](https://img.shields.io/badge/macOS-13.0%2B-blue)

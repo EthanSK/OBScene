@@ -95,17 +95,9 @@
       </header>
 
       <section class="screenshot-wrap wrap">
-        <div class="screenshot-pair">
-          <figure class="screenshot screenshot--menu">
-            <img src="./assets/screenshot-menubar.png" alt="OBScene menu bar dropdown showing OBS connection, current scene, external display count, trigger actions, and menu items" />
-          </figure>
-          <figure class="screenshot screenshot--settings">
-            <img src="./assets/screenshot-settings.png" alt="OBScene settings window showing a Display-triggered profile with plug-in/plug-out mode, trigger delay, and per-action delay" />
-          </figure>
-          <figure class="screenshot screenshot--settings">
-            <img src="./assets/screenshot-usb.png" alt="OBScene settings window showing a USB-triggered profile with the USB device picker open and connected devices listed" />
-          </figure>
-        </div>
+        <figure class="screenshot screenshot--hero">
+          <img src="./assets/screenshot-settings.png" alt="OBScene settings window showing a Display-triggered profile with plug-in/plug-out mode, trigger delay, and per-action delay" />
+        </figure>
       </section>
 
       <section class="features wrap">
@@ -249,6 +241,56 @@
         </div>
       </footer>
     </div>
+
+    <!-- ── Screenshot Lightbox ── -->
+    <div class="lightbox" id="lightbox" aria-hidden="true">
+      <button class="lightbox-close" aria-label="Close">&times;</button>
+      <img src="" alt="" />
+    </div>
+
+    <script>
+      /* ── Screenshot hover-to-fullscreen lightbox ── */
+      (function () {
+        var lb = document.getElementById('lightbox');
+        if (!lb) return;
+        var lbImg = lb.querySelector('img');
+        var lbClose = lb.querySelector('.lightbox-close');
+
+        function open(src, alt) {
+          lbImg.src = src;
+          lbImg.alt = alt || '';
+          lb.classList.add('lightbox--open');
+          lb.setAttribute('aria-hidden', 'false');
+          document.body.style.overflow = 'hidden';
+        }
+
+        function close() {
+          lb.classList.remove('lightbox--open');
+          lb.setAttribute('aria-hidden', 'true');
+          document.body.style.overflow = '';
+        }
+
+        /* Click any screenshot container (or its image) to open */
+        document.querySelectorAll('.screenshot').forEach(function (container) {
+          container.addEventListener('click', function () {
+            var img = container.querySelector('img');
+            if (img) open(img.src, img.alt);
+          });
+        });
+
+        /* Close on backdrop click (not on the image itself) */
+        lb.addEventListener('click', function (e) {
+          if (e.target === lb) close();
+        });
+
+        lbClose.addEventListener('click', close);
+
+        /* Close on Escape */
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape') close();
+        });
+      })();
+    </script>
 
     <script>
       (function syncSiteVersion() {
