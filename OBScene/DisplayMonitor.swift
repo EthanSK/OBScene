@@ -352,13 +352,28 @@ class DisplayMonitor {
     //     fired before the profile has applied can use the old output path /
     //     encoder settings.
     //
-    // OBS doesn't expose synchronous confirmation over the WebSocket v5
-    // request/response channel for scene collection + profile switches
-    // (the collection-changed event comes later), so we sequence the steps
-    // with small fixed delays instead.
-    private static let collectionToProfileDelay: TimeInterval = 0.5  // 500ms
-    private static let profileToSceneDelay:      TimeInterval = 0.5  // 500ms
+    // As of 2026-04-18 we now verify each profile / scene-collection change
+    // landed by polling OBS for the current value, with up to 3 retries on
+    // failure — see `setProfileAndVerify` / `setSceneCollectionAndVerify`
+    // in `OBSWebSocketManager`. That replaces the blind fixed-delay approach
+    // for those two steps. We still use a short fixed delay between the
+    // verified scene-collection set and the scene/action phase, because the
+    // scene list itself is populated by OBS asynchronously after the
+    // collection switch (the WebSocket v5 request ACK returns before the
+    // new scenes are indexed).
+    //
+    // Order note (Ethan's diagnosis, 2026-04-18): profile switches lag more
+    // than scene-collection switches, so we now switch the PROFILE FIRST
+    // and the scene collection SECOND. That makes the overall operation
+    // land more deterministically — by the time the scene-collection change
+    // completes, the profile has settled too.
     private static let sceneToActionsDelay:      TimeInterval = 0.25 // 250ms
+    /// Brief settle delay after a verified scene-collection change before
+    /// we ask OBS for the new scene list. OBS repopulates `GetSceneList`
+    /// asynchronously after the collection switch; the verification poll
+    /// tells us the collection name flipped but doesn't guarantee the scene
+    /// list has been rebuilt yet.
+    private static let collectionSettleDelay:    TimeInterval = 0.5  // 500ms
 
     private func runTriggerActions(for profile: TriggerProfile) {
         let obs = OBSWebSocketManager.shared
@@ -374,28 +389,35 @@ class DisplayMonitor {
             userInfo: ["profile": profile]
         )
 
-        func runSceneCollection(then next: @escaping () -> Void) {
-            if profile.selectedSceneCollection.isEmpty {
-                next()
-                return
-            }
-            obs.setSceneCollection(profile.selectedSceneCollection)
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + Self.collectionToProfileDelay,
-                execute: next
-            )
-        }
-
+        // Profile FIRST, scene collection SECOND. See the MARK comment above
+        // for rationale. Both are verified + retried on failure; the error
+        // case is surfaced via ActivityLog + UserNotifier and does NOT abort
+        // the trigger — we still try to advance to the scene / actions so
+        // that e.g. a missing profile doesn't suppress "Start Recording"
+        // on a reasonable default profile OBS is already on.
         func runProfile(then next: @escaping () -> Void) {
             if profile.selectedProfile.isEmpty {
                 next()
                 return
             }
-            obs.setProfile(profile.selectedProfile)
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + Self.profileToSceneDelay,
-                execute: next
-            )
+            obs.setProfileAndVerify(profile.selectedProfile) { _ in
+                next()
+            }
+        }
+
+        func runSceneCollection(then next: @escaping () -> Void) {
+            if profile.selectedSceneCollection.isEmpty {
+                next()
+                return
+            }
+            obs.setSceneCollectionAndVerify(profile.selectedSceneCollection) { _ in
+                // Even after verification, the new scene list may not be
+                // populated in OBS yet; wait briefly before the scene step.
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + Self.collectionSettleDelay,
+                    execute: next
+                )
+            }
         }
 
         func runScene(then next: @escaping () -> Void) {
@@ -535,8 +557,10 @@ class DisplayMonitor {
             }
         }
 
-        runSceneCollection {
-            runProfile {
+        // Order: profile → scene collection → scene → actions.
+        // See the MARK comment above — profile goes first on purpose.
+        runProfile {
+            runSceneCollection {
                 runScene {
                     runConfiguredActions()
                 }

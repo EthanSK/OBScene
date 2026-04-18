@@ -13,6 +13,7 @@
 		A10000040000000000000004 /* DisplayMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000040000000000000004 /* DisplayMonitor.swift */; };
 		A10000050000000000000005 /* OBSWebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000050000000000000005 /* OBSWebSocketManager.swift */; };
 		A10000060000000000000006 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000060000000000000006 /* SettingsView.swift */; };
+		A100000C00000000000000C /* VerifiedSetEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000E000000000000000E /* VerifiedSetEngine.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +25,7 @@
 		A20000060000000000000006 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A20000070000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000080000000000000008 /* OBScene.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OBScene.entitlements; sourceTree = "<group>"; };
+		A200000E000000000000000E /* VerifiedSetEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedSetEngine.swift; sourceTree = "<group>"; };
 		A30000010000000000000001 /* OBScene.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OBScene.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -55,6 +57,7 @@
 				A20000040000000000000004 /* DisplayMonitor.swift */,
 				A20000050000000000000005 /* OBSWebSocketManager.swift */,
 				A20000060000000000000006 /* SettingsView.swift */,
+				A200000E000000000000000E /* VerifiedSetEngine.swift */,
 				A20000070000000000000007 /* Info.plist */,
 				A20000080000000000000008 /* OBScene.entitlements */,
 			);
@@ -132,6 +135,7 @@
 				A10000040000000000000004 /* DisplayMonitor.swift in Sources */,
 				A10000050000000000000005 /* OBSWebSocketManager.swift in Sources */,
 				A10000060000000000000006 /* SettingsView.swift in Sources */,
+				A100000C00000000000000C /* VerifiedSetEngine.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

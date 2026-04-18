@@ -646,6 +646,135 @@ class OBSWebSocketManager: ObservableObject {
         sendRequest("SetCurrentProgramScene", data: ["sceneName": name])
     }
 
+    // MARK: - Verified profile / scene collection switching
+    //
+    // Fire-and-forget `SetCurrentProfile` / `SetCurrentSceneCollection` are
+    // unreliable in practice: when a user plugs in a tracked device we've seen
+    // the scene collection change but the profile silently fail to apply,
+    // leaving OBS half-switched. The fix has three parts:
+    //
+    //   1. Order matters — switch the profile FIRST (it lags more than the
+    //      scene collection on OBS's side). That ordering is enforced by the
+    //      caller in `DisplayMonitor.runTriggerActions`.
+    //   2. Verify the change actually landed by polling OBS for the current
+    //      value after the set request — don't trust the request succeeded
+    //      just because OBS ACKed it.
+    //   3. Retry up to 3 times with exponential backoff (1s, 2s, 4s) if the
+    //      verification times out, because OBS occasionally drops a profile
+    //      switch when it's busy. Bug fix 2026-04-18.
+    //
+    // The actual state machine lives in `VerifiedSetEngine` so it can be
+    // unit-tested in isolation (see `scripts/test-retry-verify.swift`).
+
+    private static let verifiedSetConfig = VerifiedSetConfig()
+
+    /// Dependency bundle that wires the pure engine up to this manager.
+    private func verifiedSetDeps(
+        requestType: String,
+        dataBuilder: @escaping (String) -> [String: Any],
+        fetchRequestType: String,
+        currentKey: String,
+        listKeypath: @escaping () -> [String]
+    ) -> VerifiedSetDependencies {
+        return VerifiedSetDependencies(
+            isConnected: { [weak self] in self?.isConnected ?? false },
+            knownList: listKeypath,
+            apply: { [weak self] target, done in
+                self?.sendRequest(
+                    requestType,
+                    data: dataBuilder(target)
+                ) { _ in done() }
+            },
+            fetchCurrent: { [weak self] done in
+                self?.sendRequest(fetchRequestType) { response in
+                    let current = (response as? [String: Any])?[currentKey] as? String
+                    done(current)
+                }
+            },
+            log: { message in
+                print("[OBScene] \(message)")
+                ActivityLog.shared.log(.info, message)
+            }
+        )
+    }
+
+    /// Set the current OBS profile and verify it landed, retrying up to 3x.
+    /// Completion runs on the main queue with `.success` once verified, or
+    /// `.failure(VerifiedSetError)` after exhausting retries.
+    func setProfileAndVerify(
+        _ name: String,
+        completion: @escaping (Result<Void, VerifiedSetError>) -> Void
+    ) {
+        // OBS WebSocket v5 has no `GetCurrentProfile` — the current profile
+        // name is returned alongside `GetProfileList`.
+        let deps = verifiedSetDeps(
+            requestType: "SetCurrentProfile",
+            dataBuilder: { ["profileName": $0] },
+            fetchRequestType: "GetProfileList",
+            currentKey: "currentProfileName",
+            listKeypath: { [weak self] in self?.profiles ?? [] }
+        )
+        VerifiedSetEngine.run(
+            kind: "profile",
+            target: name,
+            config: Self.verifiedSetConfig,
+            deps: deps
+        ) { result in
+            if case .failure(let err) = result {
+                Self.notifyUserOfVerifiedSetFailure(kind: "profile", error: err)
+            }
+            completion(result)
+        }
+    }
+
+    /// Set the current OBS scene collection and verify it landed, retrying
+    /// up to 3x. See `setProfileAndVerify` for semantics.
+    func setSceneCollectionAndVerify(
+        _ name: String,
+        completion: @escaping (Result<Void, VerifiedSetError>) -> Void
+    ) {
+        let deps = verifiedSetDeps(
+            requestType: "SetCurrentSceneCollection",
+            dataBuilder: { ["sceneCollectionName": $0] },
+            fetchRequestType: "GetSceneCollectionList",
+            currentKey: "currentSceneCollectionName",
+            listKeypath: { [weak self] in self?.sceneCollections ?? [] }
+        )
+        VerifiedSetEngine.run(
+            kind: "scene collection",
+            target: name,
+            config: Self.verifiedSetConfig,
+            deps: deps
+        ) { result in
+            if case .failure(let err) = result {
+                Self.notifyUserOfVerifiedSetFailure(kind: "scene collection", error: err)
+            }
+            completion(result)
+        }
+    }
+
+    /// Surface a notification to the user when a verified-set ultimately
+    /// fails. Kept separate from the engine so tests don't pop NSUserNotifications.
+    private static func notifyUserOfVerifiedSetFailure(kind: String, error: VerifiedSetError) {
+        switch error {
+        case .notConnected:
+            UserNotifier.post(
+                title: "OBScene: couldn't switch \(kind)",
+                body: "OBS WebSocket disconnected while switching \(kind)."
+            )
+        case .notFound(let name, _):
+            UserNotifier.post(
+                title: "OBScene: \(kind) not found",
+                body: "'\(name)' is not a known \(kind) in OBS — check your OBScene config."
+            )
+        case .verificationFailed(let target, let current, let attempts):
+            UserNotifier.post(
+                title: "OBScene: couldn't switch \(kind)",
+                body: "Failed to change \(kind) to '\(target)' after \(attempts) attempts — OBS reports '\(current ?? "unknown")'."
+            )
+        }
+    }
+
     func startRecording() {
         sendRequest("StartRecord") { _ in
             ActivityLog.shared.log(.recordingStarted, "Recording started")
