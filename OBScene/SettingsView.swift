@@ -390,6 +390,22 @@ struct SettingsView: View {
                 Text("Seconds between each action when the profile fires. Leave at 0 to fire them all at once.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                // Run-on-activate shell hook. Optional; blank = no script.
+                // Runs detached under the user's login shell ($SHELL -l -c,
+                // falling back to /bin/bash) when the profile fires, with
+                // stdout/stderr logged to ~/Library/Logs/OBScene/script-runs.log.
+                Divider().padding(.vertical, 2)
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Run on activate:")
+                    TextField("e.g. restream-channel-switch --flag wreathen", text: profile.runScript)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                Text("Shell command executed when this profile activates. Runs detached under your login shell (zsh/bash -l -c); output is logged to ~/Library/Logs/OBScene/script-runs.log. Leave blank to disable.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)

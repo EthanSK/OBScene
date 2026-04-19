@@ -305,6 +305,17 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// their original all-at-once behaviour.
     var delayBetweenActions: Double = 0.0
 
+    /// Optional shell command to run when this profile activates (immediately
+    /// before the OBS actions fire). Runs detached under the user's login
+    /// shell (`$SHELL -l -c <cmd>`, falling back to `/bin/bash -l -c`), and
+    /// stdout/stderr are appended to `~/Library/Logs/OBScene/script-runs.log`
+    /// so the main app never blocks on the script. Defaults to empty, which
+    /// means no script is run.
+    ///
+    /// Security note: this runs arbitrary shell. Only configure scripts you
+    /// trust — this is an intentional power-user hook, not a sandboxed API.
+    var runScript: String = ""
+
     init() {}
 
     // Coding keys — we persist the legacy per-action flags under their
@@ -325,6 +336,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         case migratedToModeSchema
         case triggerDelay
         case delayBetweenActions
+        case runScript
     }
 
     // Custom decoder for forward compatibility — new fields fall back to
@@ -358,6 +370,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         migratedToModeSchema = try container.decodeIfPresent(Bool.self, forKey: .migratedToModeSchema) ?? migratedToModeSchema
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
         delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? delayBetweenActions
+        runScript = try container.decodeIfPresent(String.self, forKey: .runScript) ?? runScript
     }
 
     /// Convenience: returns the config for a given action kind in this

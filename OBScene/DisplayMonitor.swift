@@ -146,6 +146,19 @@ class DisplayMonitor {
         externalDisplayCount = max(0, externalCount)
     }
 
+    /// True iff this profile has any OBS-facing work configured — an
+    /// action, or a scene collection / profile / scene selection. Script-only
+    /// profiles (runScript set, nothing else) return false and therefore
+    /// don't cause OBS warm-up, auto-launch, or the full connect pipeline to
+    /// run. Kept as a `static` so the scheduling helpers can call it before
+    /// an instance is required on the trigger hot path.
+    private static func profileHasOBSWork(_ profile: TriggerProfile) -> Bool {
+        return !profile.actions.isEmpty
+            || !profile.selectedSceneCollection.isEmpty
+            || !profile.selectedProfile.isEmpty
+            || !profile.selectedScene.isEmpty
+    }
+
     private func scheduleTrigger(for profile: TriggerProfile) {
         cancelPendingTrigger(for: profile.id)
 
@@ -163,10 +176,15 @@ class DisplayMonitor {
         // Kick off OBS auto-launch + WebSocket warm-up in parallel with the
         // countdown so that by the time the delay elapses, OBS is hopefully
         // already up and connected. Net plug-in-to-recording time stays close
-        // to `delay` seconds even when OBS is cold.
+        // to `delay` seconds even when OBS is cold. Skipped for script-only
+        // profiles so the hook doesn't incur an unexpected OBS launch.
         let obs = OBSWebSocketManager.shared
         let config = ConfigStore.shared.config
-        if !obs.isConnected && config.hasBeenConfigured && !config.obsHost.isEmpty {
+        if Self.profileHasOBSWork(profile)
+            && !obs.isConnected
+            && config.hasBeenConfigured
+            && !config.obsHost.isEmpty
+        {
             _ = obs.ensureConnected(
                 host: config.obsHost,
                 port: config.obsPort,
@@ -223,10 +241,15 @@ class DisplayMonitor {
         print("[OBScene] USB trigger scheduled in \(delay)s for profile '\(profile.name)'")
         ActivityLog.shared.log(.triggerScheduled, "USB trigger scheduled in \(delay)s (\(profile.name))")
 
-        // Kick off OBS auto-launch in parallel.
+        // Kick off OBS auto-launch in parallel. Skipped for script-only
+        // profiles so the hook doesn't incur an unexpected OBS launch.
         let obs = OBSWebSocketManager.shared
         let config = ConfigStore.shared.config
-        if !obs.isConnected && config.hasBeenConfigured && !config.obsHost.isEmpty {
+        if Self.profileHasOBSWork(profile)
+            && !obs.isConnected
+            && config.hasBeenConfigured
+            && !config.obsHost.isEmpty
+        {
             _ = obs.ensureConnected(
                 host: config.obsHost,
                 port: config.obsPort,
@@ -274,6 +297,32 @@ class DisplayMonitor {
         guard let profile = ConfigStore.shared.config.profiles.first(where: { $0.id == profileId }),
               profile.isEnabled else {
             print("[OBScene] Trigger fired but profile not found or disabled")
+            return
+        }
+
+        // Fire the per-profile "Run on activate" shell hook FIRST, before any
+        // OBS connection gating. This way script-only profiles still work
+        // when OBS is disconnected / unconfigured / not installed, and scripts
+        // intended to prep or recover OBS (e.g. `open -a OBS`, reset a
+        // WebSocket) have a chance to run before the OBS pipeline bails out.
+        // The script runs detached; the main trigger pipeline proceeds
+        // immediately afterwards. Empty / whitespace-only runScript values
+        // are no-ops inside ScriptRunner.
+        let hasScript = !profile.runScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasScript {
+            ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
+            ScriptRunner.run(script: profile.runScript, profileName: profile.name)
+        }
+
+        // Script-only fast path: if the profile has no OBS work to do
+        // (no actions queued, no scene collection / profile / scene selected),
+        // we're done after the script. This avoids an otherwise-avoidable
+        // OBS connect / auto-launch side effect for users who just want a
+        // shell hook on plug in/out without touching OBS at all. The same
+        // predicate gates the warm-up in scheduleTrigger/scheduleUSBTrigger
+        // so the OBS connection is never even started for script-only
+        // profiles.
+        if hasScript && !Self.profileHasOBSWork(profile) {
             return
         }
 
