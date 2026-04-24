@@ -501,10 +501,14 @@ class DisplayMonitor {
                     if action.mode == .start { obs.startVirtualCam() } else { obs.stopVirtualCam() }
                 case .replayBuffer:
                     if action.mode == .start { obs.startReplayBuffer() } else { obs.stopReplayBuffer() }
-                case .refreshBrowsers:
-                    ActivityLog.shared.log(.info, "Refreshing browser tabs")
-                    BrowserRefresher.refreshAllBrowsers()
-                case .refreshOBSBrowserSources:
+                case .refreshBrowsers, .refreshOBSBrowserSources:
+                    // Both action kinds now refresh OBS browser sources only.
+                    // The legacy `.refreshBrowsers` used to also reload the
+                    // system Chrome/Safari/Arc/Firefox windows via AppleScript,
+                    // but that was never the intent — the feature is meant to
+                    // reload the browser SOURCES inside OBS scenes, not the
+                    // user's system browser apps. Kept as an alias so older
+                    // saved configs still work. Bug fix 2026-04-21.
                     ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
                     obs.refreshAllBrowserSources()
                 }
@@ -559,29 +563,22 @@ class DisplayMonitor {
                     }
                 }
 
-                let hasBrowserRefresh = profile.actions.contains { $0.kind == .refreshBrowsers }
-                let hasOBSRefresh = profile.actions.contains { $0.kind == .refreshOBSBrowserSources }
-
-                if hasBrowserRefresh {
-                    let item = DispatchWorkItem {
-                        ActivityLog.shared.log(.info, "Refreshing browser tabs")
-                        BrowserRefresher.refreshAllBrowsers()
-                    }
-                    self.inFlightActionWorkItems[profileId, default: []].append(item)
-                    DispatchQueue.main.asyncAfter(
-                        deadline: .now() + BrowserRefresher.postTriggerDelay,
-                        execute: item
-                    )
+                // `.refreshBrowsers` is now an alias for `.refreshOBSBrowserSources`
+                // (see `fire(_:)` above), so we only need a single deferred
+                // refresh here even if a profile has both action kinds — they
+                // do the same thing and one OBS refresh call covers both.
+                let hasAnyBrowserRefresh = profile.actions.contains {
+                    $0.kind == .refreshBrowsers || $0.kind == .refreshOBSBrowserSources
                 }
 
-                if hasOBSRefresh {
+                if hasAnyBrowserRefresh {
                     let item = DispatchWorkItem {
                         ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
                         obs.refreshAllBrowserSources()
                     }
                     self.inFlightActionWorkItems[profileId, default: []].append(item)
                     DispatchQueue.main.asyncAfter(
-                        deadline: .now() + BrowserRefresher.postTriggerDelay + 1.0,
+                        deadline: .now() + BrowserRefresher.postTriggerDelay,
                         execute: item
                     )
                 }

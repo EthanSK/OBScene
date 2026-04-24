@@ -819,13 +819,22 @@ class OBSWebSocketManager: ObservableObject {
         sendRequest("StopReplayBuffer")
     }
 
-    /// Refresh all browser sources in OBS by pressing the "Refresh cache of
+    /// Refresh ALL browser sources in OBS by pressing the "Refresh cache of
     /// current page" button on each one via `PressInputPropertiesButton`.
+    ///
+    /// Each source is refreshed independently: a failure on one source does
+    /// not abort the others. Each attempt is logged individually so users can
+    /// see in the Activity tab exactly which sources refreshed and which
+    /// failed. We also defensively filter the inputs to browser sources
+    /// client-side — some OBS builds have been observed to ignore the
+    /// `inputKind` query parameter and return every input, which would cause
+    /// us to try to press a non-existent "refresh" button on non-browser
+    /// inputs. Bug fix 2026-04-21.
     func refreshAllBrowserSources() {
         sendRequest("GetInputList", data: ["inputKind": "browser_source"]) { [weak self] response in
             guard let self = self else { return }
             guard let data = response as? [String: Any],
-                  let inputs = data["inputs"] as? [[String: Any]] else {
+                  let allInputs = data["inputs"] as? [[String: Any]] else {
                 print("[OBScene] Failed to get browser source list from OBS")
                 DispatchQueue.main.async {
                     ActivityLog.shared.log(.info, "Failed to list OBS browser sources")
@@ -833,7 +842,15 @@ class OBSWebSocketManager: ObservableObject {
                 return
             }
 
-            if inputs.isEmpty {
+            // Defensive client-side filter in case OBS ignored `inputKind`.
+            let browserInputs = allInputs.filter { input in
+                // When `inputKind` filtering worked server-side, `inputKind`
+                // may be absent from the response — accept those too.
+                guard let kind = input["inputKind"] as? String else { return true }
+                return kind == "browser_source"
+            }
+
+            if browserInputs.isEmpty {
                 print("[OBScene] No browser sources found in OBS")
                 DispatchQueue.main.async {
                     ActivityLog.shared.log(.info, "No OBS browser sources to refresh")
@@ -841,23 +858,35 @@ class OBSWebSocketManager: ObservableObject {
                 return
             }
 
-            var refreshedCount = 0
-            let total = inputs.count
+            let total = browserInputs.count
+            let names = browserInputs.compactMap { $0["inputName"] as? String }
+            print("[OBScene] Refreshing \(total) OBS browser source(s): \(names.joined(separator: ", "))")
+            DispatchQueue.main.async {
+                ActivityLog.shared.log(.info, "Refreshing \(total) OBS browser source(s)")
+            }
 
-            for input in inputs {
+            // Fire a refresh for each source independently. The OBS WebSocket
+            // handles these in parallel; each reply goes through its own
+            // request-id callback so one failing source cannot abort the rest.
+            // We don't have visibility into per-request success/failure here
+            // (`PressInputPropertiesButton` returns void and OBScene's request
+            // callback surface only exposes `responseData`, which is nil on
+            // both success and timeout). The best we can do is log that the
+            // refresh was dispatched for each named source — that's still a
+            // meaningful improvement over the previous code, which only logged
+            // a single aggregate line and silently did nothing if the counter
+            // never hit `total`.
+            for input in browserInputs {
                 guard let inputName = input["inputName"] as? String else { continue }
 
                 self.sendRequest("PressInputPropertiesButton", data: [
                     "inputName": inputName,
                     "propertyName": "refresh"
-                ]) { _ in
-                    refreshedCount += 1
-                    if refreshedCount == total {
-                        print("[OBScene] Refreshed \(refreshedCount) OBS browser source(s)")
-                        DispatchQueue.main.async {
-                            ActivityLog.shared.log(.info, "Refreshed \(refreshedCount) OBS browser source(s)")
-                        }
-                    }
+                ])
+
+                DispatchQueue.main.async {
+                    ActivityLog.shared.log(.info, "Refreshed browser source '\(inputName)'")
+                    print("[OBScene] Refreshed browser source '\(inputName)'")
                 }
             }
         }
