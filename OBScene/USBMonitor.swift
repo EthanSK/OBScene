@@ -449,10 +449,24 @@ class USBMonitor {
         }
     }
 
-    /// Retry delays (ms) for DiskArbitration volume-label resolution. Covers
-    /// fast (~100ms) and slow (~1.5s) USB storage enumeration without
-    /// hammering the work queue.
-    private static let volumeLabelRefreshDelaysMs: [Int] = [150, 400, 800, 1500]
+    /// Retry delays (ms) for DiskArbitration volume-label resolution. Must
+    /// cover BOTH the fast path (IOMedia → DA mount in <1s for a freshly
+    /// plugged stick on an awake Mac) AND the slow path where the Mac is
+    /// waking from sleep with the device still plugged in: the kernel
+    /// re-enumerates USB, IOSCSIBlockCommandsDevice re-probes the medium
+    /// (`MODE_SENSE_06` retries), and DiskArbitration only dispatches its
+    /// mount-approval callback once SCSI finishes — observed at ~7s on a
+    /// T6000 after a ~20min sleep.
+    ///
+    /// The old 2.85s-total schedule gave up well before DA mounted, so
+    /// profiles that match on *volume label* (e.g. "Public") never fired on
+    /// wake-from-sleep. Extend the tail out to ~30s so volume labels have
+    /// time to resolve even on slow USB 2 sticks with sluggish SCSI probes.
+    /// Cumulative timeline: 0.15, 0.55, 1.35, 2.85, 5.35, 8.35, 12.35,
+    /// 17.35, 23.35, 30.35 seconds after first-match.
+    private static let volumeLabelRefreshDelaysMs: [Int] = [
+        150, 400, 800, 1500, 2500, 3000, 4000, 5000, 6000, 7000
+    ]
 
     /// Re-enumerate USB devices looking for the one whose cache key we
     /// captured earlier, and if volume labels have now appeared, update the
