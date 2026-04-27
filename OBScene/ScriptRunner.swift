@@ -21,11 +21,34 @@ enum ScriptRunner {
     /// Path to the per-profile script run log. Opened lazily, appended to.
     /// Lives in `~/Library/Logs/OBScene/script-runs.log` so it shows up in
     /// Console.app under "~/Library/Logs" alongside other app-specific logs.
-    private static var logFileURL: URL {
+    ///
+    /// Exposed `internal` so the Settings UI ("Open Logs" button) can hand
+    /// the same URL off to `NSWorkspace.open` without duplicating the path
+    /// derivation. The file may not exist until the first script run; callers
+    /// that surface this in the UI should ensure the directory + an empty
+    /// file exist via `ensureLogFileExists()` before opening.
+    static var logFileURL: URL {
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("OBScene", isDirectory: true)
         return logs.appendingPathComponent("script-runs.log", isDirectory: false)
+    }
+
+    /// Best-effort: make sure the log directory and an empty log file both
+    /// exist on disk so `NSWorkspace.open` has something to hand to the
+    /// user's default `.log` editor. No-op when the file already exists.
+    /// Errors are intentionally swallowed — this is a UX nicety, not a
+    /// correctness path; the run-time logging codepath also creates the
+    /// file lazily inside `run(...)`.
+    static func ensureLogFileExists() {
+        let url = logFileURL
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
     }
 
     /// Serial queue for log-file appends. `Pipe` callbacks may arrive on

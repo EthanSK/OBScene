@@ -1184,6 +1184,60 @@ class OBSWebSocketManager: ObservableObject {
     }
 }
 
+// MARK: - Permission denial notification
+//
+// Surfaced to SettingsView so the user gets an actionable alert with a
+// deep-link to the relevant System Settings pane when an OBS-restart fails
+// because macOS blocked the Apple Event used by `terminate()`.
+//
+// `NSRunningApplication.terminate()` on a different app's process sends a
+// "quit" Apple Event. macOS gates that with the **Automation** TCC
+// permission (System Settings -> Privacy & Security -> Automation -> OBScene
+// -> OBS). The first call shows the standard "OBScene wants to control OBS"
+// prompt; if denied (or revoked), subsequent calls return `true` but the
+// event is silently dropped — OBS keeps running. We detect that by polling
+// the PID for an early sign of exit and posting this notification when no
+// progress is made within `permissionDenialDetectionSeconds`.
+extension Notification.Name {
+    /// Posted when OBScene believes a privileged operation was blocked by a
+    /// missing TCC permission. `userInfo` carries:
+    ///   - `obscenePermissionKind`: a `OBScenePermissionKind` raw value
+    ///     ("automation" | "accessibility").
+    ///   - `obscenePermissionTarget`: a human-readable name of the target
+    ///     app, e.g. "OBS Studio".
+    ///   - `obscenePermissionContext`: a one-line user-facing description of
+    ///     what was being attempted (e.g. "restart OBS before running script").
+    static let obscenePermissionDenied = Notification.Name("obscenePermissionDenied")
+}
+
+/// Categories of macOS TCC permissions OBScene cares about. Maps to the
+/// deep-link URL used to open the right System Settings pane.
+enum OBScenePermissionKind: String {
+    case automation
+    case accessibility
+
+    /// Deep-link to System Settings -> Privacy & Security -> <kind>.
+    /// Verified working on macOS 13+ (System Settings) and macOS 12
+    /// (System Preferences) — the same URL scheme is honoured by both.
+    var systemSettingsURL: URL {
+        switch self {
+        case .automation:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!
+        case .accessibility:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        }
+    }
+
+    /// Section name shown in the alert, kept consistent with the System
+    /// Settings pane title so users can locate the row visually.
+    var displayName: String {
+        switch self {
+        case .automation: return "Automation"
+        case .accessibility: return "Accessibility"
+        }
+    }
+}
+
 // MARK: - OBSAppController
 //
 // Quit-and-relaunch pipeline used by the per-profile "Restart OBS before
@@ -1241,6 +1295,17 @@ enum OBSAppController {
     /// orchestration needs its own shorter caps so the documented restart
     /// deadlines remain meaningful if OBS exits mid-request.
     private static let restartRequestTimeoutSeconds: TimeInterval = 2.0
+
+    /// If `terminate()` returned true but the OBS PID is still healthy
+    /// (`NSRunningApplication.isTerminated == false`) after this many seconds,
+    /// we treat it as a *silently-blocked Apple Event* — i.e. macOS dropped
+    /// the quit event because the Automation TCC permission for OBScene ->
+    /// OBS Studio is denied. We post `obscenePermissionDenied` so the UI
+    /// can surface a deep-link to System Settings. Tuned conservatively:
+    /// OBS normally begins exiting within a few hundred ms of receiving
+    /// the quit AE, so 3s gives ample headroom for a slow machine without
+    /// being so long that the user thinks the app is hung.
+    private static let permissionDenialDetectionSeconds: TimeInterval = 3.0
 
     /// Mutated only on the main thread (every entry point dispatches to .main
     /// before touching this). Stores the timestamp at which the most recent
@@ -1451,12 +1516,48 @@ enum OBSAppController {
         if !didTerminate {
             ActivityLog.shared.log(.info,
                 "OBS terminate() returned false — aborting restart (\(profileName))")
+            // terminate() returning false generally means the AE round-trip
+            // failed outright (target gone or refused). We can't tell from
+            // the Cocoa API whether that was TCC vs. some other reason, so
+            // surface the most likely actionable explanation.
+            Self.postPermissionDenied(
+                kind: .automation,
+                targetName: "OBS Studio",
+                context: "restart OBS before running profile \"\(profileName)\""
+            )
             Self.restartInFlight = false
             restoreWebSocketAfterAbort()
             beforeRun()
             return
         }
         ActivityLog.shared.log(.info, "OBS terminate() sent (\(profileName))")
+
+        // Early permission-denial probe: if the PID is still healthy after
+        // `permissionDenialDetectionSeconds` we *suspect* TCC silently
+        // dropped the quit AE, so we surface a one-shot notification. We
+        // keep polling for the full `terminateTimeoutSeconds` window in
+        // case OBS is just slow to start exiting — the notification is
+        // advisory, not terminal. Captures `runningApp` so we can read
+        // `isTerminated` without re-resolving by PID (which can race when
+        // a new process recycles the same PID).
+        let probeRunningApp = runningApp
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.permissionDenialDetectionSeconds
+        ) {
+            // Still in flight AND target hasn't started exiting? Most likely
+            // explanation on a healthy machine is TCC blocked the AE. We
+            // post the notification once and let `pollForExit` continue —
+            // if OBS exits later, we just relaunch and the user got an
+            // unnecessary alert (acceptable false-positive trade-off).
+            guard Self.restartInFlight, !probeRunningApp.isTerminated else { return }
+            ActivityLog.shared.log(.info,
+                "OBS still running \(Int(Self.permissionDenialDetectionSeconds))s after terminate() — suspecting Automation permission denied (\(profileName))")
+            Self.postPermissionDenied(
+                kind: .automation,
+                targetName: "OBS Studio",
+                context: "restart OBS before running profile \"\(profileName)\""
+            )
+        }
 
         // Step 4: poll until the PID is no longer reachable.
         Self.pollForExit(pid: pid, deadline: Date().addingTimeInterval(Self.terminateTimeoutSeconds)) { exited in
@@ -1637,6 +1738,35 @@ enum OBSAppController {
                     completion: completion
                 )
             }
+        }
+    }
+
+    /// Post a `obscenePermissionDenied` notification on the main queue so
+    /// SettingsView can surface an actionable alert. De-duplicated across a
+    /// short window so a burst of failures (e.g. terminate-returns-false +
+    /// the 3s detection probe firing immediately after) only produces one
+    /// alert per user-perceived event.
+    private static var lastPermissionDenialAt: Date?
+    private static let permissionDenialDedupeWindow: TimeInterval = 5.0
+
+    private static func postPermissionDenied(kind: OBScenePermissionKind,
+                                             targetName: String,
+                                             context: String) {
+        DispatchQueue.main.async {
+            if let last = Self.lastPermissionDenialAt,
+               Date().timeIntervalSince(last) < Self.permissionDenialDedupeWindow {
+                return
+            }
+            Self.lastPermissionDenialAt = Date()
+            NotificationCenter.default.post(
+                name: .obscenePermissionDenied,
+                object: nil,
+                userInfo: [
+                    "obscenePermissionKind": kind.rawValue,
+                    "obscenePermissionTarget": targetName,
+                    "obscenePermissionContext": context,
+                ]
+            )
         }
     }
 

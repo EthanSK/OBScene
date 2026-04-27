@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject var configStore: ConfigStore
@@ -14,6 +15,37 @@ struct SettingsView: View {
 
     @State private var launchAtLogin: Bool = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil
     @State private var launchAtLoginError: String? = nil
+
+    /// Permission-denial alert state. Populated when an `obscenePermissionDenied`
+    /// notification arrives (e.g. an OBS-restart Apple Event was silently
+    /// dropped because Automation TCC was denied). The alert offers a single
+    /// "Open System Settings" affordance that deep-links to the relevant
+    /// Privacy & Security pane.
+    @State private var permissionAlert: PermissionAlertInfo?
+
+    /// Snapshot of the data needed to render and act on the permission alert.
+    /// Identifiable so SwiftUI's `.alert(item:)` re-fires when a fresh
+    /// notification arrives even if a previous one was dismissed for the
+    /// same `kind`.
+    fileprivate struct PermissionAlertInfo: Identifiable {
+        let id = UUID()
+        let kind: OBScenePermissionKind
+        let targetName: String
+        let context: String
+
+        var title: String {
+            "OBScene needs \(kind.displayName) permission"
+        }
+
+        var message: String {
+            switch kind {
+            case .automation:
+                return "macOS blocked OBScene from controlling \(targetName) (needed to \(context)). Open System Settings to grant permission, then try again."
+            case .accessibility:
+                return "macOS blocked OBScene from a request that needed Accessibility access (needed to \(context)). Open System Settings to grant permission, then try again."
+            }
+        }
+    }
 
     /// Live snapshot of currently-connected USB devices. Seeded on first appear
     /// and refreshed whenever the USBMonitor posts a connect/disconnect
@@ -99,6 +131,32 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .usbDeviceVolumeLabelsResolved)) { _ in
             refreshConnectedUSBDevices()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .obscenePermissionDenied)) { note in
+            handlePermissionDenied(note)
+        }
+        .alert(item: $permissionAlert) { info in
+            Alert(
+                title: Text(info.title),
+                message: Text(info.message),
+                primaryButton: .default(Text("Open System Settings")) {
+                    NSWorkspace.shared.open(info.kind.systemSettingsURL)
+                },
+                secondaryButton: .cancel(Text("Not Now"))
+            )
+        }
+    }
+
+    /// Translate an incoming permission-denied notification into the
+    /// `permissionAlert` state. Defensive parsing — a malformed userInfo
+    /// just falls back to the Automation pane (best guess) rather than
+    /// crashing or silently dropping the alert.
+    private func handlePermissionDenied(_ note: Notification) {
+        let info = note.userInfo ?? [:]
+        let kindRaw = info["obscenePermissionKind"] as? String ?? OBScenePermissionKind.automation.rawValue
+        let kind = OBScenePermissionKind(rawValue: kindRaw) ?? .automation
+        let target = info["obscenePermissionTarget"] as? String ?? "the target app"
+        let context = info["obscenePermissionContext"] as? String ?? "complete the requested action"
+        permissionAlert = PermissionAlertInfo(kind: kind, targetName: target, context: context)
     }
 
     // MARK: - Layouts
@@ -837,6 +895,22 @@ struct SettingsView: View {
     private var activitySection: some View {
         GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
             VStack(alignment: .leading, spacing: 8) {
+                // "Open Logs" handed Ethan the script-runs.log file (the
+                // same path mentioned in the per-profile script help text)
+                // so he can audit shell output without spelunking through
+                // ~/Library/Logs. We don't force Console.app — handing the
+                // URL to NSWorkspace lets the user's default `.log` editor
+                // open it (Console.app, BBEdit, VS Code, whatever).
+                HStack {
+                    Spacer()
+                    Button {
+                        openScriptRunsLog()
+                    } label: {
+                        Label("Open Logs", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .help("Open ~/Library/Logs/OBScene/script-runs.log in your default .log editor.")
+                }
+
                 if activityLog.events.isEmpty {
                     Text("No activity yet. Connect a display or run a test action.")
                         .font(.caption)
@@ -865,6 +939,21 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Open the script-runs log file in the user's default `.log` editor
+    /// (typically Console.app on a fresh macOS install). Creates the file
+    /// first if it doesn't exist yet — without this, NSWorkspace.open would
+    /// fall back to Finder showing the empty Logs/OBScene directory.
+    private func openScriptRunsLog() {
+        ScriptRunner.ensureLogFileExists()
+        let url = ScriptRunner.logFileURL
+        if !NSWorkspace.shared.open(url) {
+            // Fallback: reveal in Finder so the user can still see the file
+            // exists, even if no .log handler is registered (rare but
+            // possible if the user has unbound the extension).
+            NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
 
