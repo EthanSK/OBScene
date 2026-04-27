@@ -309,6 +309,39 @@ class DisplayMonitor {
         // immediately afterwards. Empty / whitespace-only runScript values
         // are no-ops inside ScriptRunner.
         let hasScript = !profile.runScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        // If the profile has both a script AND `restartOBSBeforeRun`, the
+        // script must run *after* OBS has restarted (workaround for the
+        // Custom Browser Dock refresh limitation — full app restart is the
+        // only reliable way to make a dock pick up an updated URL). In that
+        // case we route the whole flow through `OBSAppController.restartOBS`,
+        // which gates on streaming/recording state and short-circuits if
+        // either is active. After the restart settles, we run the script
+        // and then resume the rest of the trigger pipeline (OBS actions).
+        //
+        // For all other cases (no script, or script but no restart), keep
+        // the original synchronous behaviour.
+        if hasScript && profile.restartOBSBeforeRun {
+            ActivityLog.shared.log(.info, "Restart-before-run requested (\(profile.name))")
+            OBSAppController.restartOBS(profileName: profile.name) { [weak self] in
+                guard let self = self else { return }
+                ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
+                ScriptRunner.run(script: profile.runScript, profileName: profile.name)
+
+                // Same script-only fast-path check as the synchronous branch.
+                if !Self.profileHasOBSWork(profile) { return }
+
+                // Resume the OBS pipeline. Restart() leaves the WebSocket
+                // either connected (happy path) or disconnected (the user has
+                // recording/streaming active and we skipped restart, OR the
+                // restart aborted on timeout — in both cases the existing
+                // ensureConnected logic in `continueOBSPipeline` handles it
+                // correctly).
+                self.continueOBSPipeline(for: profile)
+            }
+            return
+        }
+
         if hasScript {
             ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
             ScriptRunner.run(script: profile.runScript, profileName: profile.name)
@@ -326,6 +359,13 @@ class DisplayMonitor {
             return
         }
 
+        continueOBSPipeline(for: profile)
+    }
+
+    /// Drives the OBS-connection / action-firing tail of the trigger pipeline.
+    /// Extracted from `executeTrigger` so the restart-OBS-before-run flow can
+    /// also call into it once the restart settles.
+    private func continueOBSPipeline(for profile: TriggerProfile) {
         let config = ConfigStore.shared.config
         let obs = OBSWebSocketManager.shared
 

@@ -316,6 +316,20 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// trust — this is an intentional power-user hook, not a sandboxed API.
     var runScript: String = ""
 
+    /// When true, OBScene will gracefully quit OBS, wait for it to relaunch,
+    /// and only then run `runScript`. This is a workaround for the Custom
+    /// Browser Dock refresh limitation: there is no programmatic refresh API
+    /// for docks, so a full app restart is the only reliable way to make the
+    /// dock pick up an updated URL / cookie / channel.
+    ///
+    /// The restart is automatically SKIPPED if OBS is currently recording or
+    /// streaming — we never kill a live capture session. In that case the
+    /// script still runs (just without the preceding restart).
+    ///
+    /// Defaults to false so existing profiles keep their behaviour after an
+    /// upgrade.
+    var restartOBSBeforeRun: Bool = false
+
     init() {}
 
     // Coding keys — we persist the legacy per-action flags under their
@@ -337,6 +351,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         case triggerDelay
         case delayBetweenActions
         case runScript
+        case restartOBSBeforeRun
     }
 
     // Custom decoder for forward compatibility — new fields fall back to
@@ -371,6 +386,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
         delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? delayBetweenActions
         runScript = try container.decodeIfPresent(String.self, forKey: .runScript) ?? runScript
+        restartOBSBeforeRun = try container.decodeIfPresent(Bool.self, forKey: .restartOBSBeforeRun) ?? restartOBSBeforeRun
     }
 
     /// Convenience: returns the config for a given action kind in this

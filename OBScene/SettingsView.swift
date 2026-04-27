@@ -398,11 +398,23 @@ struct SettingsView: View {
                 Divider().padding(.vertical, 2)
                 HStack(alignment: .firstTextBaseline) {
                     Text("Run on activate:")
-                    TextField("e.g. restream-channel-switch --flag wreathen", text: profile.runScript)
+                    TextField("e.g. restream-channel-switch --alias reeethan", text: profile.runScript)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                 }
                 Text("Shell command executed when this profile activates. Runs detached under your login shell (zsh/bash -l -c); output is logged to ~/Library/Logs/OBScene/script-runs.log. Leave blank to disable.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Restart-OBS-before-run hook. Workaround for the Custom Browser
+                // Dock refresh limitation — OBS exposes no programmatic refresh
+                // API for docks, so a full app restart is the only reliable way
+                // to force them to reload with updated URLs / cookies. Skipped
+                // automatically if OBS is currently recording or streaming.
+                Toggle("Restart OBS before running", isOn: profile.restartOBSBeforeRun)
+                    .padding(.top, 2)
+                Text("Quits OBS gracefully, waits for it to relaunch, then runs the command. Useful for refreshing custom browser docks. Skipped if OBS is currently recording or streaming (won't kill a live session).")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

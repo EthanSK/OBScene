@@ -879,9 +879,15 @@ class OBSWebSocketManager: ObservableObject {
             for input in browserInputs {
                 guard let inputName = input["inputName"] as? String else { continue }
 
+                // OBS 32.1.1's browser-source plugin exposes the manual
+                // refresh button under the internal property name
+                // `refreshnocache`, not `refresh`. Using `refresh` causes OBS
+                // WebSocket to reject the request with code 600
+                // ("Unable to find a property by that name.") and nothing is
+                // actually reloaded.
                 self.sendRequest("PressInputPropertiesButton", data: [
                     "inputName": inputName,
-                    "propertyName": "refresh"
+                    "propertyName": "refreshnocache"
                 ])
 
                 DispatchQueue.main.async {
@@ -1120,5 +1126,543 @@ class OBSWebSocketManager: ObservableObject {
         inflightEnsureHandle?.cancelled = true
         inflightEnsureHandle = nil
         ensureLock.unlock()
+    }
+
+    // MARK: - Live-session status (used by restart-OBS pre-flight)
+
+    /// Fetch the current OBS streaming state. The completion is invoked with
+    /// `true` if OBS reports an active stream, `false` if not, and `nil` if
+    /// the request failed / timed out (caller should treat nil as "unknown,
+    /// don't kill OBS just in case").
+    func getStreamingActive(completion: @escaping (Bool?) -> Void) {
+        sendRequest("GetStreamStatus") { response in
+            guard let data = response as? [String: Any] else {
+                completion(nil); return
+            }
+            // OBS WebSocket v5 returns `outputActive: Bool` for GetStreamStatus.
+            if let active = data["outputActive"] as? Bool {
+                completion(active)
+            } else {
+                completion(nil)
+            }
+        }
+    }
+
+    /// Fetch the current OBS recording state. See `getStreamingActive` for
+    /// the nil-vs-false semantics.
+    func getRecordingActive(completion: @escaping (Bool?) -> Void) {
+        sendRequest("GetRecordStatus") { response in
+            guard let data = response as? [String: Any] else {
+                completion(nil); return
+            }
+            if let active = data["outputActive"] as? Bool {
+                completion(active)
+            } else {
+                completion(nil)
+            }
+        }
+    }
+
+    /// Issue a `GetVersion` ping. Used after a restart to verify the OBS
+    /// WebSocket has come back online and is answering. Completion fires with
+    /// `true` on a successful response, `false` if the request returned no
+    /// data (treated as not-yet-ready by callers).
+    func getVersion(completion: @escaping (Bool) -> Void) {
+        sendRequest("GetVersion") { response in
+            completion(response as? [String: Any] != nil)
+        }
+    }
+
+    /// Persist the current OBS scene-collection state to disk via
+    /// `SaveSceneCollection`. Best-effort — if OBS doesn't recognise the
+    /// request (older builds), the call simply has no effect and the
+    /// completion still fires.
+    func saveSceneCollection(completion: @escaping () -> Void) {
+        sendRequest("SaveSceneCollection") { _ in
+            completion()
+        }
+    }
+}
+
+// MARK: - OBSAppController
+//
+// Quit-and-relaunch pipeline used by the per-profile "Restart OBS before
+// running" toggle. This is a workaround for the Custom Browser Dock refresh
+// limitation in OBS — there is no programmatic refresh API for docks, so a
+// full app restart is the only reliable way to make a dock pick up an updated
+// URL / cookie / channel after we change something externally.
+//
+// Sequence (when no recording/streaming is active):
+//   1. Pre-flight: ask OBS for GetStreamStatus + GetRecordStatus. If either
+//      is active, SKIP the restart entirely and just run the script — we
+//      never kill a live capture session.
+//   2. Best-effort SaveSceneCollection so the relaunched OBS sees latest state.
+//   3. Graceful terminate() of the running OBS application (NOT SIGKILL —
+//      OBS needs to write its own config files cleanly).
+//   4. Poll until NSRunningApplication for that PID is gone, with a 15s cap.
+//      If it doesn't exit cleanly, abort and DO NOT run the script.
+//   5. Relaunch via NSWorkspace.shared.openApplication. macOS restores window
+//      position automatically because OBS persisted it on the graceful quit.
+//   6. Poll the OBS WebSocket with GetVersion until it answers, capped at 30s.
+//      If it never answers, abort and DO NOT run the script.
+//   7. Wait an extra ~1.5s for browser docks to fetch their URLs (they load
+//      async after OBS starts).
+//   8. Hand control back to the caller via `beforeRun()`.
+//
+// Throttling: if a restart was started or completed within the last 30s, the
+// next call short-circuits and runs `beforeRun()` immediately. This prevents
+// USB plug events that bounce 3x in 2s from queuing up multiple restarts.
+//
+// All steps log to ActivityLog with `.info` so they show up in the in-app
+// Activity tab and in the existing OBScene log file pipeline.
+
+enum OBSAppController {
+
+    /// Throttle window — successive restart requests inside this many seconds
+    /// of the most recent in-progress / completed restart run the script
+    /// immediately instead of restarting again.
+    private static let throttleWindow: TimeInterval = 30.0
+
+    /// Maximum time we'll wait for OBS to exit after sending terminate(),
+    /// in seconds. After this we abort the restart (we do NOT escalate to
+    /// SIGKILL — that would risk corrupting OBS config files).
+    private static let terminateTimeoutSeconds: TimeInterval = 15.0
+
+    /// Maximum time we'll wait for the OBS WebSocket to come back up after
+    /// we relaunch the app, in seconds.
+    private static let websocketReadyTimeoutSeconds: TimeInterval = 30.0
+
+    /// Extra settle delay after the WebSocket reports ready, to give browser
+    /// docks time to fetch their URLs (they load async post-launch).
+    private static let postReadySettleSeconds: TimeInterval = 1.5
+
+    /// Per-request cap for best-effort probes inside the restart flow. OBS
+    /// request callbacks have a broader generic cleanup path, but restart
+    /// orchestration needs its own shorter caps so the documented restart
+    /// deadlines remain meaningful if OBS exits mid-request.
+    private static let restartRequestTimeoutSeconds: TimeInterval = 2.0
+
+    /// Mutated only on the main thread (every entry point dispatches to .main
+    /// before touching this). Stores the timestamp at which the most recent
+    /// restart was kicked off so subsequent fires within `throttleWindow`
+    /// can short-circuit.
+    private static var lastRestartAt: Date?
+
+    /// True when a restart is currently in progress. Concurrent calls during
+    /// the in-flight window short-circuit straight to `beforeRun()` so a
+    /// burst of plug events doesn't queue up multiple restarts.
+    private static var restartInFlight: Bool = false
+
+    /// Public entry point. Called from DisplayMonitor's profile-fire handler
+    /// when `profile.restartOBSBeforeRun == true`. `profileName` is logged for
+    /// auditability. `beforeRun` is the closure that actually invokes the
+    /// user's script (via ScriptRunner) — we call it after the restart
+    /// settles, OR immediately when we skip / throttle.
+    static func restartOBS(profileName: String, beforeRun: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            // Throttle: a recent or in-flight restart short-circuits.
+            if Self.restartInFlight {
+                ActivityLog.shared.log(.info,
+                    "OBS restart already in progress (\(profileName)) — skipping restart, running script")
+                beforeRun()
+                return
+            }
+            if let last = Self.lastRestartAt,
+               Date().timeIntervalSince(last) < Self.throttleWindow {
+                ActivityLog.shared.log(.info,
+                    "OBS restart throttled (last was <\(Int(Self.throttleWindow))s ago, \(profileName)) — running script")
+                beforeRun()
+                return
+            }
+
+            ActivityLog.shared.log(.info, "OBS restart requested for profile \(profileName)")
+
+            let obs = OBSWebSocketManager.shared
+
+            // If OBS isn't running at all, there's nothing to restart — just
+            // run the script. Auto-launch (if configured) is handled by the
+            // existing trigger pipeline downstream.
+            guard obs.isOBSRunning() else {
+                ActivityLog.shared.log(.info,
+                    "OBS not running — skipping restart, running script (\(profileName))")
+                beforeRun()
+                return
+            }
+
+            // If OBScene isn't currently connected to the WebSocket, we have
+            // no way to query streaming/recording state — bail safely (don't
+            // kill OBS blind). Run the script anyway so the user-visible side
+            // effect still happens.
+            guard obs.isConnected else {
+                ActivityLog.shared.log(.info,
+                    "OBS not connected to WebSocket — skipping restart for safety, running script (\(profileName))")
+                beforeRun()
+                return
+            }
+
+            // Reserve the restart slot before the async pre-flight so two
+            // concurrent profile fires cannot both pass the throttle and
+            // initiate separate restarts.
+            Self.restartInFlight = true
+
+            // Pre-flight: check streaming + recording state in parallel.
+            // We never restart while either is active.
+            Self.checkLiveSession(obs: obs) { isLive in
+                if isLive {
+                    ActivityLog.shared.log(.info,
+                        "OBS recording or streaming active — skipping restart, running script (\(profileName))")
+                    Self.restartInFlight = false
+                    beforeRun()
+                    return
+                }
+
+                // Cleared for restart. Record timestamp for post-restart throttle.
+                Self.lastRestartAt = Date()
+
+                // Best-effort save of scene-collection state before quitting.
+                Self.saveSceneCollectionBestEffort(obs: obs) {
+                    DispatchQueue.main.async {
+                        Self.performRestart(
+                            profileName: profileName,
+                            beforeRun: beforeRun
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private static func saveSceneCollectionBestEffort(obs: OBSWebSocketManager,
+                                                      completion: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            var completed = false
+
+            func complete() {
+                guard !completed else { return }
+                completed = true
+                completion()
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.restartRequestTimeoutSeconds) {
+                complete()
+            }
+
+            obs.saveSceneCollection {
+                DispatchQueue.main.async {
+                    complete()
+                }
+            }
+        }
+    }
+
+    /// Dispatch streaming + recording status checks in parallel and call
+    /// `completion(true)` if either is active, `completion(false)` if both
+    /// are inactive. If a status request fails (returns nil), we treat that
+    /// as "active" — i.e. err on the side of NOT killing OBS.
+    private static func checkLiveSession(obs: OBSWebSocketManager,
+                                         completion: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async {
+            var streamActive: Bool?
+            var streamDone = false
+            var recordActive: Bool?
+            var recordDone = false
+            var completed = false
+
+            func complete(_ isLive: Bool) {
+                guard !completed else { return }
+                completed = true
+                completion(isLive)
+            }
+
+            func finishIfReady() {
+                guard streamDone, recordDone else { return }
+                // `nil` means we couldn't determine state — treat as live.
+                complete((streamActive ?? true) || (recordActive ?? true))
+            }
+
+            // Hard cap on the pre-flight: if OBS doesn't reply within 5s,
+            // treat that as "live / unknown" and skip the restart.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                complete(true) // err on the side of caution
+            }
+
+            obs.getStreamingActive { active in
+                DispatchQueue.main.async {
+                    guard !completed else { return }
+                    streamActive = active
+                    streamDone = true
+                    finishIfReady()
+                }
+            }
+            obs.getRecordingActive { active in
+                DispatchQueue.main.async {
+                    guard !completed else { return }
+                    recordActive = active
+                    recordDone = true
+                    finishIfReady()
+                }
+            }
+        }
+    }
+
+    /// Step 3 onwards: terminate, wait, relaunch, wait for websocket, settle,
+    /// then call `beforeRun()`.
+    private static func performRestart(profileName: String,
+                                       beforeRun: @escaping () -> Void) {
+        let obs = OBSWebSocketManager.shared
+
+        // Re-resolve the running OBS instance (it may have exited between the
+        // pre-flight and now — unlikely but possible).
+        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+        }) else {
+            ActivityLog.shared.log(.info,
+                "OBS no longer running at restart step — running script (\(profileName))")
+            Self.restartInFlight = false
+            beforeRun()
+            return
+        }
+        let pid = runningApp.processIdentifier
+        guard let obsAppURL = obs.obsApplicationURL() else {
+            ActivityLog.shared.log(.info,
+                "OBS app bundle not resolvable — aborting restart (\(profileName))")
+            Self.restartInFlight = false
+            beforeRun()
+            return
+        }
+
+        // Disconnect our own WebSocket up-front so the auto-reconnect loop
+        // doesn't fight the quit + relaunch. We re-issue an explicit connect
+        // after OBS is back up.
+        let host = ConfigStore.shared.config.obsHost
+        let port = ConfigStore.shared.config.obsPort
+        let password = ConfigStore.shared.config.obsPassword
+        obs.disconnect()
+
+        func restoreWebSocketAfterAbort() {
+            obs.connect(host: host, port: port, password: password)
+        }
+
+        // Graceful quit. NSRunningApplication.terminate() is the AppleScript-
+        // equivalent ("tell application … to quit") — OBS gets a chance to
+        // write its config and shut down cleanly.
+        let quitStartedAt = Date()
+        let didTerminate = runningApp.terminate()
+        if !didTerminate {
+            ActivityLog.shared.log(.info,
+                "OBS terminate() returned false — aborting restart (\(profileName))")
+            Self.restartInFlight = false
+            restoreWebSocketAfterAbort()
+            beforeRun()
+            return
+        }
+        ActivityLog.shared.log(.info, "OBS terminate() sent (\(profileName))")
+
+        // Step 4: poll until the PID is no longer reachable.
+        Self.pollForExit(pid: pid, deadline: Date().addingTimeInterval(Self.terminateTimeoutSeconds)) { exited in
+            DispatchQueue.main.async {
+                guard exited else {
+                    let elapsed = Date().timeIntervalSince(quitStartedAt)
+                    ActivityLog.shared.log(.info,
+                        "OBS did not exit within \(Int(Self.terminateTimeoutSeconds))s (elapsed \(String(format: "%.1f", elapsed))s) — aborting restart (\(profileName))")
+                    // Don't run the script here: we said in the design that
+                    // if the restart fails, we abort the whole flow.
+                    Self.restartInFlight = false
+                    restoreWebSocketAfterAbort()
+                    return
+                }
+                let elapsed = Date().timeIntervalSince(quitStartedAt)
+                ActivityLog.shared.log(.info,
+                    "OBS terminated after \(String(format: "%.1f", elapsed))s — relaunching (\(profileName))")
+
+                // Step 5: relaunch.
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = false
+                config.addsToRecentItems = false
+                config.hides = false
+                NSWorkspace.shared.openApplication(at: obsAppURL, configuration: config) { runningApp, error in
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            ActivityLog.shared.log(.info,
+                                "OBS relaunch failed: \(error.localizedDescription) (\(profileName))")
+                            Self.restartInFlight = false
+                            restoreWebSocketAfterAbort()
+                            return
+                        }
+                        if let app = runningApp {
+                            // Same Safe Mode dialog watcher we use for the
+                            // initial auto-launch path.
+                            SafeModeDialogDismisser.shared.watchForDialog(runningApp: app)
+                        }
+                        ActivityLog.shared.log(.info,
+                            "OBS relaunched, waiting for websocket... (\(profileName))")
+
+                        // Re-issue our WebSocket connect attempt — this loops
+                        // internally until it succeeds or we time out below.
+                        obs.connect(host: host, port: port, password: password)
+
+                        // Step 6: poll GetVersion.
+                        Self.pollForWebSocketReady(
+                            obs: obs,
+                            host: host,
+                            port: port,
+                            password: password,
+                            deadline: Date().addingTimeInterval(Self.websocketReadyTimeoutSeconds)
+                        ) { ready in
+                            DispatchQueue.main.async {
+                                guard ready else {
+                                    ActivityLog.shared.log(.info,
+                                        "OBS websocket did not come up within \(Int(Self.websocketReadyTimeoutSeconds))s — aborting (\(profileName))")
+                                    Self.restartInFlight = false
+                                    return
+                                }
+                                ActivityLog.shared.log(.info,
+                                    "OBS ready, running script (\(profileName))")
+                                // Step 7: settle delay so docks finish loading.
+                                DispatchQueue.main.asyncAfter(
+                                    deadline: .now() + Self.postReadySettleSeconds
+                                ) {
+                                    Self.restartInFlight = false
+                                    beforeRun()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Poll until `NSRunningApplication(processIdentifier:)` returns nil, or
+    /// until `deadline`. Calls `completion(true)` if it exited in time,
+    /// `completion(false)` on timeout. Polls on a background queue at 250ms.
+    private static func pollForExit(pid: pid_t,
+                                    deadline: Date,
+                                    completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global().async {
+            while Date() < deadline {
+                if NSRunningApplication(processIdentifier: pid) == nil {
+                    completion(true)
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+            // One final check after the loop in case the last sleep edged us
+            // past the deadline.
+            completion(NSRunningApplication(processIdentifier: pid) == nil)
+        }
+    }
+
+    /// Poll the OBS WebSocket by issuing GetVersion every 1s (after waiting
+    /// 500ms for the first attempt) until it succeeds or `deadline` passes.
+    /// We also re-issue `connect()` every 4s in case the first connect attempt
+    /// fired before OBS had finished binding the WebSocket port.
+    private static func pollForWebSocketReady(
+        obs: OBSWebSocketManager,
+        host: String,
+        port: Int,
+        password: String,
+        deadline: Date,
+        completion: @escaping (Bool) -> Void
+    ) {
+        // First check happens after a small delay so OBS has time to start
+        // up and bind the port.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            Self.checkVersionLoop(
+                obs: obs,
+                host: host,
+                port: port,
+                password: password,
+                deadline: deadline,
+                lastReconnectAt: Date(),
+                completion: completion
+            )
+        }
+    }
+
+    private static func checkVersionLoop(
+        obs: OBSWebSocketManager,
+        host: String,
+        port: Int,
+        password: String,
+        deadline: Date,
+        lastReconnectAt: Date,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if Date() >= deadline {
+            completion(false)
+            return
+        }
+
+        // We can only meaningfully ping GetVersion if we have a connection.
+        // If not, re-issue connect() and try again on the next tick.
+        if !obs.isConnected {
+            var nextLastReconnect = lastReconnectAt
+            if Date().timeIntervalSince(lastReconnectAt) >= 4.0 {
+                obs.connect(host: host, port: port, password: password)
+                nextLastReconnect = Date()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                Self.checkVersionLoop(
+                    obs: obs,
+                    host: host,
+                    port: port,
+                    password: password,
+                    deadline: deadline,
+                    lastReconnectAt: nextLastReconnect,
+                    completion: completion
+                )
+            }
+            return
+        }
+
+        let requestTimeout = min(Self.restartRequestTimeoutSeconds, max(0.1, deadline.timeIntervalSinceNow))
+        Self.getVersionWithTimeout(obs: obs, timeoutSeconds: requestTimeout) { ok in
+            if ok {
+                completion(true)
+                return
+            }
+            if Date() >= deadline {
+                completion(false)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                Self.checkVersionLoop(
+                    obs: obs,
+                    host: host,
+                    port: port,
+                    password: password,
+                    deadline: deadline,
+                    lastReconnectAt: lastReconnectAt,
+                    completion: completion
+                )
+            }
+        }
+    }
+
+    private static func getVersionWithTimeout(
+        obs: OBSWebSocketManager,
+        timeoutSeconds: TimeInterval,
+        completion: @escaping (Bool) -> Void
+    ) {
+        DispatchQueue.main.async {
+            var completed = false
+
+            func complete(_ ok: Bool) {
+                guard !completed else { return }
+                completed = true
+                completion(ok)
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
+                complete(false)
+            }
+
+            obs.getVersion { ok in
+                DispatchQueue.main.async {
+                    complete(ok)
+                }
+            }
+        }
     }
 }
