@@ -485,7 +485,7 @@ struct SettingsView: View {
                     Toggle("Run script before restart", isOn: profile.runScriptBeforeRestart)
                         .padding(.leading, 18)
                         .padding(.top, 2)
-                    Text("Fire the script BEFORE quitting OBS, instead of after the relaunch. The script is launched detached either way, so it runs in parallel with the restart — wait inside the script itself if you need it to finish before OBS goes down.")
+                    Text("Fire the script BEFORE quitting OBS, instead of after the relaunch. OBScene waits for the script's process to exit (capped at 60s) before sending OBS the quit signal, so any side effects land first. If the script hangs past the cap it's left running in the background and the restart proceeds anyway.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 18)
@@ -839,6 +839,15 @@ struct SettingsView: View {
                     Spacer(minLength: 0)
                 }
                 .disabled(!configStore.config.autoLaunchOBS)
+
+                Divider().padding(.vertical, 1)
+
+                Toggle("Restore Mission Control Space on OBS restart",
+                       isOn: $configStore.config.restoreSpaceOnRestart)
+                Text("When OBScene restarts OBS (via the per-profile \"Restart OBS before running\" toggle), capture the Space the OBS window was on before quitting and move OBS back to that Space after relaunch. Falls back gracefully on macOS versions where the required private API is unavailable.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)

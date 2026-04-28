@@ -336,14 +336,12 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// OBS over the WebSocket itself, capturing OBS state, or prepping
     /// something the restart will later consume).
     ///
-    /// Timing semantics: the script is launched detached via
-    /// `ScriptRunner.run` (same as the after-restart path). We do NOT wait for
-    /// it to finish before kicking off the restart — the existing after-restart
-    /// path is also detached, and blocking the main app on a user-supplied
-    /// shell command would risk hangs. If you need the script to complete
-    /// before the restart starts, do the wait inside the script itself
-    /// (e.g. by exec-ing a wrapper that exits only when its side effects have
-    /// landed).
+    /// Timing semantics: the script is launched via
+    /// `ScriptRunner.runAndWait` and OBScene WAITS for the underlying Process
+    /// to exit before issuing the OBS terminate event. There's a 60s safety
+    /// cap — if the script hangs past that we log a warning, leave the child
+    /// running detached (orphaned to launchd, same fire-and-forget contract
+    /// as the legacy path) and proceed with the restart anyway.
     ///
     /// No effect when `restartOBSBeforeRun` is false (the script always runs
     /// before the OBS pipeline in that case anyway — there's no restart to
@@ -464,6 +462,19 @@ struct AppConfig: Codable, Equatable {
     var refreshBrowsersOnTrigger: Bool = true
     var refreshOBSBrowserSourcesOnTrigger: Bool = false
 
+    /// Restore the macOS Space (Mission Control workspace) the OBS window was
+    /// on before a "Restart OBS before running" cycle. Captured pre-terminate,
+    /// reapplied post-relaunch via the SkyLight private SPI. Disabled
+    /// gracefully if the SPI is unavailable on the user's macOS — see
+    /// `SpaceManager` for the runtime guard.
+    ///
+    /// Defaults to true: most users have a deliberate Space layout for OBS
+    /// (e.g. its own dedicated Space) and the bug this fixes (OBS reopening
+    /// on whatever Space is current at restart time) is annoying enough that
+    /// the safer default is "do the right thing automatically". A power
+    /// user who wants the legacy behaviour can flip this off in Settings.
+    var restoreSpaceOnRestart: Bool = true
+
     init() {}
 
     // Custom decoder so that adding new fields to `AppConfig` doesn't wipe out
@@ -496,6 +507,7 @@ struct AppConfig: Codable, Equatable {
         requiredExternalDisplays = try container.decodeIfPresent(Int.self, forKey: .requiredExternalDisplays) ?? requiredExternalDisplays
         refreshBrowsersOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshBrowsersOnTrigger) ?? refreshBrowsersOnTrigger
         refreshOBSBrowserSourcesOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshOBSBrowserSourcesOnTrigger) ?? refreshOBSBrowserSourcesOnTrigger
+        restoreSpaceOnRestart = try container.decodeIfPresent(Bool.self, forKey: .restoreSpaceOnRestart) ?? restoreSpaceOnRestart
     }
 
     /// Migrate legacy single-config settings into the profiles array. Called

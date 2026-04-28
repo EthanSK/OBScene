@@ -1321,6 +1321,14 @@ enum OBSAppController {
     /// docks time to fetch their URLs (they load async post-launch).
     private static let postReadySettleSeconds: TimeInterval = 1.5
 
+    /// Maximum time we'll wait for OBS's main window to appear in the
+    /// CGWindowList after relaunch before giving up on the Space-restore
+    /// step. By the time the WebSocket reports ready the window IS usually
+    /// already up, but there's typically still a tiny gap (sub-second) on
+    /// slow machines. 5s is generous enough to cover that without making a
+    /// pathological case stall the rest of the trigger pipeline.
+    private static let spaceRestoreWindowWaitSeconds: TimeInterval = 5.0
+
     /// Per-request cap for best-effort probes inside the restart flow. OBS
     /// request callbacks have a broader generic cleanup path, but restart
     /// orchestration needs its own shorter caps so the documented restart
@@ -1778,6 +1786,37 @@ enum OBSAppController {
         let password = ConfigStore.shared.config.obsPassword
         obs.disconnect()
 
+        // Capture the Space (Mission Control workspace) the OBS main window
+        // is currently on so we can restore it after relaunch. Without this,
+        // OBS will reopen on whatever Space is currently focused at the
+        // moment macOS reactivates it, which is jarring for users with a
+        // dedicated OBS Space.
+        //
+        // We query the OBS WINDOW's space membership (not the active space):
+        // a multi-Space user will commonly trigger a restart while focused
+        // on a different Space than OBS, and capturing the active Space
+        // would move OBS to the user's current Space on relaunch — exactly
+        // the wrong outcome for the workflow this feature targets.
+        // `spaceForOBSWindow` looks up windows owned by the OBS PID with
+        // off-screen windows included, so it works even when OBS is on a
+        // Space the user isn't viewing.
+        //
+        // Both lookups are best-effort: if SkyLight is unavailable or the
+        // window/space lookup returns nothing, we skip the restore and
+        // continue with the rest of the restart. Gated on the user-visible
+        // toggle so power users can disable.
+        let restoreSpace = ConfigStore.shared.config.restoreSpaceOnRestart
+        let capturedSpaceID: UInt64? = restoreSpace ? SpaceManager.spaceForOBSWindow(pid: pid) : nil
+        if restoreSpace {
+            if let spaceID = capturedSpaceID {
+                ActivityLog.shared.log(.info,
+                    "Captured OBS Space ID \(spaceID) before terminate (\(profileName))")
+            } else {
+                ActivityLog.shared.log(.info,
+                    "OBS Space capture skipped (SkyLight unavailable, OBS window missing, or empty space list) (\(profileName))")
+            }
+        }
+
         func restoreWebSocketAfterAbort() {
             obs.connect(host: host, port: port, password: password)
         }
@@ -1919,6 +1958,28 @@ enum OBSAppController {
                                 // before dialog appeared" log if OBS is later
                                 // quit or restarted again.
                                 SafeModeDialogDismisser.shared.cancelWatcher()
+
+                                // Restore the captured Space if the user has
+                                // the toggle on AND we have something to
+                                // restore. Runs in parallel with the post-
+                                // ready settle delay; both finish before the
+                                // restart-in-flight latch is cleared. We
+                                // resolve the new OBS pid via the relaunched
+                                // running app so we look up windows owned by
+                                // the freshly-spawned process, not the dead
+                                // pre-terminate one.
+                                if let spaceID = capturedSpaceID,
+                                   let app = runningApp ?? NSWorkspace.shared.runningApplications.first(where: {
+                                       $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+                                   }) {
+                                    SpaceManager.restoreOBSWindow(
+                                        pid: app.processIdentifier,
+                                        toSpace: spaceID,
+                                        profileName: profileName,
+                                        windowWaitTimeout: Self.spaceRestoreWindowWaitSeconds
+                                    )
+                                }
+
                                 // Step 7: settle delay so docks finish loading.
                                 DispatchQueue.main.asyncAfter(
                                     deadline: .now() + Self.postReadySettleSeconds
