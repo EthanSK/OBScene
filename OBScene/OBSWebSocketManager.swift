@@ -464,6 +464,8 @@ class OBSWebSocketManager: ObservableObject {
 
     private func handleIdentified() {
         print("[OBScene] Connected to OBS WebSocket")
+        ActivityLog.shared.log(.info,
+            "OBS WebSocket Identify handshake complete — fetching initial scene/profile/collection lists")
         // Successful handshake — reset backoff and cancel any scheduled
         // reconnect so we don't bounce the freshly-established socket.
         reconnectAttemptIndex = 0
@@ -805,10 +807,17 @@ class OBSWebSocketManager: ObservableObject {
     // MARK: - OBS Commands
 
     func fetchSceneCollections() {
+        ActivityLog.shared.log(.info, "Fetching scene collections from OBS")
         sendRequest("GetSceneCollectionList") { [weak self] response in
-            guard let data = response as? [String: Any] else { return }
+            guard let data = response as? [String: Any] else {
+                ActivityLog.shared.log(.info,
+                    "fetchSceneCollections: no response data (callback fired with nil — request timed out, evicted, or failed)")
+                return
+            }
             let collections = data["sceneCollections"] as? [String] ?? []
             let current = data["currentSceneCollectionName"] as? String ?? ""
+            ActivityLog.shared.log(.info,
+                "fetchSceneCollections: received \(collections.count) collection(s), current='\(current)'")
             DispatchQueue.main.async {
                 self?.sceneCollections = collections
                 self?.currentSceneCollection = current
@@ -817,10 +826,17 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     func fetchProfiles() {
+        ActivityLog.shared.log(.info, "Fetching profiles from OBS")
         sendRequest("GetProfileList") { [weak self] response in
-            guard let data = response as? [String: Any] else { return }
+            guard let data = response as? [String: Any] else {
+                ActivityLog.shared.log(.info,
+                    "fetchProfiles: no response data (callback fired with nil — request timed out, evicted, or failed)")
+                return
+            }
             let profileList = data["profiles"] as? [String] ?? []
             let current = data["currentProfileName"] as? String ?? ""
+            ActivityLog.shared.log(.info,
+                "fetchProfiles: received \(profileList.count) profile(s), current='\(current)'")
             DispatchQueue.main.async {
                 self?.profiles = profileList
                 self?.currentProfile = current
@@ -829,15 +845,52 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     func fetchScenes() {
+        ActivityLog.shared.log(.info, "Fetching scenes from OBS")
         sendRequest("GetSceneList") { [weak self] response in
-            guard let data = response as? [String: Any] else { return }
+            guard let data = response as? [String: Any] else {
+                ActivityLog.shared.log(.info,
+                    "fetchScenes: no response data (callback fired with nil — request timed out, evicted, or failed)")
+                return
+            }
             let sceneList = data["scenes"] as? [[String: Any]] ?? []
             let sceneNames = sceneList.compactMap { $0["sceneName"] as? String }
             let current = data["currentProgramSceneName"] as? String ?? ""
+            ActivityLog.shared.log(.info,
+                "fetchScenes: received \(sceneNames.count) scene(s), current='\(current)'")
             DispatchQueue.main.async {
                 self?.scenes = sceneNames.reversed() // OBS returns them in reverse order
                 self?.currentScene = current
             }
+        }
+    }
+
+    /// Re-fetch scene collections / profiles / scenes if the cached lists are
+    /// empty. Called from `SettingsView.onAppear` and on `isConnected`
+    /// transition so a Settings window opened during the brief gap between
+    /// `handleIdentified` and the initial fetch responses (or after a
+    /// callback eviction / timeout) doesn't get stuck showing dropdowns
+    /// with only "(Don't change)". Idempotent: skips the request if the
+    /// list is already populated.
+    func refreshObsListsIfEmpty() {
+        guard isConnected else {
+            ActivityLog.shared.log(.info,
+                "refreshObsListsIfEmpty: skipped — WebSocket not connected")
+            return
+        }
+        if sceneCollections.isEmpty {
+            ActivityLog.shared.log(.info,
+                "refreshObsListsIfEmpty: sceneCollections empty — refetching")
+            fetchSceneCollections()
+        }
+        if profiles.isEmpty {
+            ActivityLog.shared.log(.info,
+                "refreshObsListsIfEmpty: profiles empty — refetching")
+            fetchProfiles()
+        }
+        if scenes.isEmpty {
+            ActivityLog.shared.log(.info,
+                "refreshObsListsIfEmpty: scenes empty — refetching")
+            fetchScenes()
         }
     }
 

@@ -130,6 +130,27 @@ struct SettingsView: View {
                 refreshLaunchAtLoginStatus()
             }
             refreshConnectedUSBDevices()
+            // Defensive re-fetch: if Settings opens during the gap between
+            // the WebSocket Identify handshake and the initial scene/
+            // profile/collection list responses landing — OR after one of
+            // those responses was lost (callback eviction at the 30s
+            // timeout, transient WebSocket bounce, etc.) — the per-profile
+            // dropdowns under "OBS Configuration" would otherwise sit
+            // empty showing only "(Don't change)". `refreshObsListsIfEmpty`
+            // is a no-op when the lists are already populated, so it's safe
+            // to call unconditionally on every appear.
+            obsManager.refreshObsListsIfEmpty()
+        }
+        .onChange(of: obsManager.isConnected) { connected in
+            // When a fresh connection lands while Settings is open (e.g.
+            // user just hit Connect, or the auto-reconnect loop succeeded),
+            // re-fetch the lists if they're still empty. `handleIdentified`
+            // already kicks off the initial fetches, so this is a belt-and-
+            // braces guard for the case where one of those callbacks was
+            // dropped before the response arrived.
+            if connected {
+                obsManager.refreshObsListsIfEmpty()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .usbDeviceConnected)) { _ in
             refreshConnectedUSBDevices()
