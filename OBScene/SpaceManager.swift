@@ -81,6 +81,72 @@ enum SpaceManager {
         return unsafeBitCast(sym, to: T.self)
     }
 
+    // MARK: - Resolved SkyLight symbol bundle
+    //
+    // Resolved once upfront (lazy, on first access) rather than per-call.
+    // This lets the public entry points fail fast — `nil` here means the
+    // feature is unavailable on this macOS and we should NEVER mutate
+    // partial state. Specifically: we resolve `addWindowsToSpaces` AND
+    // `removeWindowsFromSpaces` together so that `moveWindow` can't
+    // partially succeed (e.g. add succeeds, remove symbol missing,
+    // window left sticky on multiple Spaces with a misleading "Moved"
+    // log line).
+    //
+    // Signatures sanity-checked against yabai (src/misc/extern.h) and
+    // Hammerspoon (extensions/spaces/libspaces.m):
+    //   - CGSGetActiveSpace(cid)                              -> uint64_t
+    //   - CGSMainConnectionID()                               -> int
+    //   - CGSAddWindowsToSpaces(cid, wids, spaces)            -> CGError (Int32)
+    //   - CGSRemoveWindowsFromSpaces(cid, wids, spaces)       -> CGError (Int32)
+    //   - CGSCopySpacesForWindows(cid, mask, wids)            -> CFArrayRef (Copy = retained)
+    private struct ResolvedSymbols {
+        let mainConnectionID: @convention(c) () -> Int32
+        let getActiveSpace: @convention(c) (Int32) -> UInt64
+        // Add / Remove return CGError (Int32). Non-zero means WindowServer
+        // refused the request — we surface that as a thrown move failure
+        // so the caller can log it and the success-path "Moved" line never
+        // fires after a real WindowServer rejection.
+        let addWindowsToSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32
+        let removeWindowsFromSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32
+        // Copy* returns a retained CFArray; we declare the binding as
+        // `Unmanaged<CFArray>?` so a NULL return from the private API
+        // doesn't crash on the unwrapped cast (which is what the original
+        // non-optional `CFArray` declaration risked).
+        let copySpacesForWindows: @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+    }
+
+    /// Single resolution attempt at process start. `nil` means the feature
+    /// is unavailable on this OS (one or more required symbols missing,
+    /// or SkyLight itself didn't dlopen). All public methods gate on
+    /// this — no partial mutation is possible.
+    private static let resolvedSymbols: ResolvedSymbols? = {
+        guard skyLightHandle != nil else { return nil }
+        guard
+            let mainConnectionID: @convention(c) () -> Int32 =
+                lookup("CGSMainConnectionID", as: (@convention(c) () -> Int32).self),
+            let getActiveSpace: @convention(c) (Int32) -> UInt64 =
+                lookup("CGSGetActiveSpace", as: (@convention(c) (Int32) -> UInt64).self),
+            let addWindowsToSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32 =
+                lookup("CGSAddWindowsToSpaces",
+                       as: (@convention(c) (Int32, CFArray, CFArray) -> Int32).self),
+            let removeWindowsFromSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32 =
+                lookup("CGSRemoveWindowsFromSpaces",
+                       as: (@convention(c) (Int32, CFArray, CFArray) -> Int32).self),
+            let copySpacesForWindows: @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>? =
+                lookup("CGSCopySpacesForWindows",
+                       as: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+        else {
+            return nil
+        }
+        return ResolvedSymbols(
+            mainConnectionID: mainConnectionID,
+            getActiveSpace: getActiveSpace,
+            addWindowsToSpaces: addWindowsToSpaces,
+            removeWindowsFromSpaces: removeWindowsFromSpaces,
+            copySpacesForWindows: copySpacesForWindows
+        )
+    }()
+
     // MARK: - Public API
 
     /// Returns the SkyLight Space ID that's currently active on the main
@@ -88,15 +154,11 @@ enum SpaceManager {
     /// activity tab on first failure so the user can see the feature
     /// degraded.
     static func currentSpaceID() -> UInt64? {
-        guard
-            let connection = currentConnection(),
-            let getActiveSpace: @convention(c) (Int32) -> UInt64 =
-                lookup("CGSGetActiveSpace", as: (@convention(c) (Int32) -> UInt64).self)
-        else {
+        guard let symbols = resolvedSymbols, let connection = currentConnection() else {
             logUnavailableOnce()
             return nil
         }
-        let spaceID = getActiveSpace(connection)
+        let spaceID = symbols.getActiveSpace(connection)
         // `0` is SkyLight's "no space" sentinel — surface it as nil so the
         // caller doesn't try to move a window onto Space ID 0.
         return spaceID == 0 ? nil : spaceID
@@ -242,15 +304,30 @@ enum SpaceManager {
     /// add+remove dance is the path Hammerspoon settled on after the same
     /// regression and works reliably under stress.
     static func moveWindow(_ windowID: CGWindowID, toSpace spaceID: UInt64) throws {
+        // Fix #1: All required symbols are resolved upfront in
+        // `resolvedSymbols`. If anything is missing, treat the entire move
+        // as a hard failure BEFORE we mutate any Space membership — we
+        // never want a partial state where the window was added to the
+        // target Space but couldn't be removed from the others (sticky
+        // bug producing a misleading "Moved" log line).
+        guard let symbols = resolvedSymbols else {
+            throw SpaceMoveError.skyLightUnavailable
+        }
         guard let connection = currentConnection() else {
             throw SpaceMoveError.skyLightUnavailable
         }
-        guard
-            let addWindowsToSpaces: @convention(c) (Int32, CFArray, CFArray) -> Void =
-                lookup("CGSAddWindowsToSpaces",
-                       as: (@convention(c) (Int32, CFArray, CFArray) -> Void).self)
-        else {
-            throw SpaceMoveError.symbolMissing("CGSAddWindowsToSpaces")
+
+        // Fix #1 (current-space lookup): a nil return from
+        // `spacesForWindow` here means SkyLight refused to tell us where
+        // the window is (private-API failure). Continuing would mutate
+        // partial state — the add would land but we'd skip remove,
+        // leaving OBS sticky on whatever Spaces it was on plus the
+        // target. Treat as a hard failure. An empty (non-nil) return is
+        // tolerated: it means SkyLight reported the window is on no
+        // Spaces (rare; no remove needed, just an add).
+        guard let currentSpaces = spacesForWindow(windowID, connection: connection) else {
+            throw SpaceMoveError.unexpectedEmptyResponse(
+                "spacesForWindow(\(windowID)) returned nil before move")
         }
 
         // Wrap inputs as CFArray of NSNumber (CGSSpaceID is uint64; the SPI
@@ -260,25 +337,24 @@ enum SpaceManager {
         let widsArray = [widValue] as CFArray
         let spacesArray = [spaceValue] as CFArray
 
-        // First: figure out which spaces the window is currently on so we can
-        // remove it from those after adding it to the target. If the window
-        // is already on `spaceID`, we still issue the add (it's a no-op) and
-        // skip the remove.
-        let currentSpaces = spacesForWindow(windowID, connection: connection) ?? []
-
-        addWindowsToSpaces(connection, widsArray, spacesArray)
+        // Fix #2: SkyLight's add/remove return CGError (Int32). Zero =
+        // success, nonzero = WindowServer rejected the request. The
+        // previous `-> Void` declaration silently dropped failures and
+        // let the success log fire after a no-op move.
+        let addErr = symbols.addWindowsToSpaces(connection, widsArray, spacesArray)
+        guard addErr == 0 else {
+            throw SpaceMoveError.windowServerError(op: "CGSAddWindowsToSpaces", code: addErr)
+        }
 
         // Remove from any other spaces it was on so the window doesn't
-        // remain "sticky" to multiple Spaces. Only do this if the window
-        // had at least one OTHER space (typical case: the Space the user
-        // is currently focused on, which is not where they came from).
+        // remain "sticky" to multiple Spaces.
         let otherSpaces = currentSpaces.filter { $0 != spaceID }
-        if !otherSpaces.isEmpty,
-           let removeWindowsFromSpaces: @convention(c) (Int32, CFArray, CFArray) -> Void =
-                lookup("CGSRemoveWindowsFromSpaces",
-                       as: (@convention(c) (Int32, CFArray, CFArray) -> Void).self) {
+        if !otherSpaces.isEmpty {
             let removeArray = otherSpaces.map { NSNumber(value: $0) } as CFArray
-            removeWindowsFromSpaces(connection, widsArray, removeArray)
+            let removeErr = symbols.removeWindowsFromSpaces(connection, widsArray, removeArray)
+            guard removeErr == 0 else {
+                throw SpaceMoveError.windowServerError(op: "CGSRemoveWindowsFromSpaces", code: removeErr)
+            }
         }
     }
 
@@ -289,13 +365,25 @@ enum SpaceManager {
     ///
     /// `windowWaitTimeout` is the cap on how long we'll wait for OBS's
     /// window to show up after relaunch. After that we give up silently.
+    ///
+    /// `completion` (Fix #4) fires exactly once on the main queue when the
+    /// restore terminates — whether it succeeded, failed, or timed out
+    /// waiting for the window to show. The OBS restart flow gates its
+    /// `restartInFlight` latch on this so a follow-up restart can't fire
+    /// while the previous Space move is still pending.
     static func restoreOBSWindow(pid: pid_t,
                                  toSpace spaceID: UInt64,
                                  profileName: String,
-                                 windowWaitTimeout: TimeInterval) {
+                                 windowWaitTimeout: TimeInterval,
+                                 completion: (() -> Void)? = nil) {
         ActivityLog.shared.log(.info,
             "Polling for OBS window to restore Space \(spaceID) (\(profileName))")
         waitForWindow(pid: pid, timeout: windowWaitTimeout) { windowID in
+            defer {
+                if let completion = completion {
+                    DispatchQueue.main.async(execute: completion)
+                }
+            }
             guard let windowID = windowID else {
                 ActivityLog.shared.log(.info,
                     "OBS window did not appear within \(Int(windowWaitTimeout))s — skipping Space restore (\(profileName))")
@@ -322,6 +410,11 @@ enum SpaceManager {
         /// SkyLight returned an empty result for an operation that should
         /// always have produced one (e.g. spacesForWindow on a valid wid).
         case unexpectedEmptyResponse(String)
+        /// WindowServer (via SkyLight) rejected an add/remove call with a
+        /// nonzero CGError. Carries the operation name + raw error code so
+        /// the failure shows up in ActivityLog with enough context to
+        /// debug.
+        case windowServerError(op: String, code: Int32)
 
         var description: String {
             switch self {
@@ -331,6 +424,8 @@ enum SpaceManager {
                 return "SkyLight symbol missing: \(name)"
             case .unexpectedEmptyResponse(let detail):
                 return "SkyLight returned empty: \(detail)"
+            case .windowServerError(let op, let code):
+                return "SkyLight \(op) failed with CGError=\(code)"
             }
         }
     }
@@ -343,12 +438,8 @@ enum SpaceManager {
     /// from this macOS's SkyLight (extremely unlikely but possible on a
     /// broken system).
     private static func currentConnection() -> Int32? {
-        guard let mainConnectionID: @convention(c) () -> Int32 =
-                lookup("CGSMainConnectionID", as: (@convention(c) () -> Int32).self)
-        else {
-            return nil
-        }
-        let cid = mainConnectionID()
+        guard let symbols = resolvedSymbols else { return nil }
+        let cid = symbols.mainConnectionID()
         // 0 is SkyLight's "no connection" sentinel — same as currentSpaceID().
         return cid == 0 ? nil : cid
     }
@@ -356,17 +447,21 @@ enum SpaceManager {
     /// Return the array of Space IDs the given window is currently a member
     /// of. SkyLight masks: `0x7` = "all spaces this window is on across all
     /// users / displays" (the value yabai/Hammerspoon both use).
+    ///
+    /// Fix #3: `CGSCopySpacesForWindows` is declared returning
+    /// `Unmanaged<CFArray>?` so a NULL return from the private API doesn't
+    /// crash an unwrapped non-optional `CFArray` cast. We explicitly
+    /// `takeRetainedValue()` to consume the +1 retain count from the Copy*
+    /// API (Cocoa's "Create Rule"), then validate the bridged Swift type
+    /// before mapping.
     private static func spacesForWindow(_ wid: CGWindowID, connection: Int32) -> [UInt64]? {
-        guard
-            let copySpacesForWindows: @convention(c) (Int32, Int32, CFArray) -> CFArray =
-                lookup("CGSCopySpacesForWindows",
-                       as: (@convention(c) (Int32, Int32, CFArray) -> CFArray).self)
-        else {
-            return nil
-        }
+        guard let symbols = resolvedSymbols else { return nil }
         let widsArray = [NSNumber(value: UInt32(wid))] as CFArray
         // 0x7 = all spaces (any of: visible, current user, any display)
-        let result = copySpacesForWindows(connection, 0x7, widsArray)
+        guard let unmanaged = symbols.copySpacesForWindows(connection, 0x7, widsArray) else {
+            return nil
+        }
+        let result = unmanaged.takeRetainedValue()
         guard let spaces = result as? [NSNumber] else { return nil }
         return spaces.map { $0.uint64Value }
     }

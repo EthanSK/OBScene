@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import Darwin
 
 enum ScriptRunner {
 
@@ -203,25 +204,37 @@ enum ScriptRunner {
         // both closures see the same state.
         let completionLatch = CompletionLatch(completion: completion)
 
-        // When the process ends, tear down the readability handlers so the
-        // Pipe file descriptors can be closed and a completion line is logged.
+        // When the process ends, tear down the readability handlers and
+        // close the pipe FDs so the termination thread can exit cleanly.
         //
-        // Order is important: we fire the completion latch BEFORE the
-        // synchronous `readDataToEndOfFile()` drain. If the user's script
-        // spawns a background grandchild that inherits stdout/stderr (e.g.
-        // `something & exit 0`), the shell exits but the pipes stay open
-        // for as long as the grandchild lives. `readDataToEndOfFile()`
-        // would then block indefinitely, and our timeout side-channel
-        // sees `process.isRunning == false` so it skips the timed-out
-        // notification — net effect: the OBS restart hangs forever
-        // despite the documented 60s cap. Firing the latch first means
-        // the caller proceeds with the restart while the drain (and any
-        // log output the script still emits) finishes in the background.
+        // Fix #5 — handler ordering / FD-leak prevention:
+        // Previously, `terminationHandler` fired the completion latch and
+        // then called `readDataToEndOfFile()` on each pipe. When the
+        // user's script spawned a background grandchild that inherited
+        // stdout/stderr (e.g. `daemon-thing &`), the pipe write-ends
+        // stayed open for the lifetime of that grandchild, so EOF never
+        // arrived and `readDataToEndOfFile()` blocked forever on
+        // Foundation's termination thread. The readability handlers were
+        // only cleared AFTER those blocking reads, so each daemonising
+        // script leaked one termination thread, two FileHandles, and two
+        // readability handlers.
+        //
+        // New order:
+        //   1. Fire completion latch so the caller proceeds.
+        //   2. Clear readability handlers FIRST so Foundation stops
+        //      delivering more chunks via the dispatch source.
+        //   3. Best-effort nonblocking drain of anything that's already
+        //      buffered. We never call `readDataToEndOfFile()` or
+        //      `availableData` here; both can block on the grandchild's
+        //      lingering write-end.
+        //   4. Close the FileHandles. This drops our read-end; the
+        //      grandchild keeps the write-end; any later write sees
+        //      SIGPIPE / EPIPE. Tail output beyond what's buffered is
+        //      intentionally truncated; the alternative (block forever)
+        //      was strictly worse.
         process.terminationHandler = { proc in
-            // Surface the exit to the caller (if observing) FIRST so we
-            // don't gate completion on pipe drain. We map Process
-            // termination reason onto our `RunOutcome` enum so callers
-            // don't need to import Foundation's Process types.
+            // (1) Surface the exit to the caller before we touch any
+            // pipe state — the latch is the user-visible contract.
             let status = proc.terminationStatus
             let outcome: RunOutcome = (proc.terminationReason == .uncaughtSignal)
                 ? .signalled(signal: status)
@@ -237,22 +250,59 @@ enum ScriptRunner {
             let footer = "[\(Self.isoFormatter.string(from: Date()))] profile=\"\(tag)\" finished: status=\(status) reason=\(reason)\n"
             Self.appendToLog(footer)
 
-            // Drain any remaining buffered output. This may block while a
-            // background grandchild keeps the pipe open — we accept that
-            // because the caller has already been notified and the
-            // grandchild's stdout/stderr will keep flowing into our log
-            // (which is the documented behaviour for fire-and-forget
-            // scripts that spawn background work).
-            let remainingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingOut.isEmpty {
-                Self.appendToLog(Self.format(tag: tag, stream: "stdout", data: remainingOut))
+            // (2) Clear handlers BEFORE any read so Foundation stops
+            // pushing more data and the dispatch sources backing the
+            // handlers can be torn down.
+            let outHandle = outPipe.fileHandleForReading
+            let errHandle = errPipe.fileHandleForReading
+            outHandle.readabilityHandler = nil
+            errHandle.readabilityHandler = nil
+
+            // (3) Nonblocking drain — pull whatever's already in the
+            // kernel buffer, but never wait for EOF. `FileHandle`'s
+            // `availableData` is not safe here: outside a readability
+            // callback it may block until data or EOF, which is exactly
+            // the hang this cleanup path is avoiding.
+            //
+            // We tolerate truncation once the pipe is empty at this
+            // instant. If a grandchild writes after we close below, it
+            // will see SIGPIPE / EPIPE.
+            func drain(_ handle: FileHandle, stream: String) {
+                let fd = handle.fileDescriptor
+                let originalFlags = fcntl(fd, F_GETFL)
+                guard originalFlags >= 0 else { return }
+                guard fcntl(fd, F_SETFL, originalFlags | O_NONBLOCK) >= 0 else { return }
+                defer {
+                    _ = fcntl(fd, F_SETFL, originalFlags)
+                }
+
+                var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+                while true {
+                    let bytesRead = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+                        guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+                        return Darwin.read(fd, baseAddress, rawBuffer.count)
+                    }
+
+                    if bytesRead > 0 {
+                        let chunk = Data(buffer[0..<bytesRead])
+                        Self.appendToLog(Self.format(tag: tag, stream: stream, data: chunk))
+                        continue
+                    }
+                    if bytesRead == 0 { break }
+                    if errno == EINTR { continue }
+                    if errno == EAGAIN || errno == EWOULDBLOCK { break }
+                    break
+                }
             }
-            let remainingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingErr.isEmpty {
-                Self.appendToLog(Self.format(tag: tag, stream: "stderr", data: remainingErr))
-            }
-            outPipe.fileHandleForReading.readabilityHandler = nil
-            errPipe.fileHandleForReading.readabilityHandler = nil
+            drain(outHandle, stream: "stdout")
+            drain(errHandle, stream: "stderr")
+
+            // (4) Drop our read-end. If a grandchild still holds the
+            // write-end, kernel will SIGPIPE its next write; that's the
+            // documented detached-grandchild contract — nothing for us
+            // to clean up further.
+            try? outHandle.close()
+            try? errHandle.close()
         }
 
         do {
@@ -260,10 +310,15 @@ enum ScriptRunner {
         } catch {
             let msg = "[\(Self.isoFormatter.string(from: Date()))] profile=\"\(tag)\" failed to launch: \(error.localizedDescription)\n"
             Self.appendToLog(msg)
+            // Mirror Fix #5 cleanup order: clear handlers first, then
+            // close the FDs so we never leak file descriptors when the
+            // shell binary is missing or exec fails. terminationHandler
+            // never fires in this path, so we own the cleanup.
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
-            // The process never started; terminationHandler will not fire,
-            // so notify the caller directly.
+            try? outPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForReading.close()
+            // The process never started; notify the caller directly.
             completionLatch.fire(.failedToLaunch(reason: error.localizedDescription))
             return nil
         }

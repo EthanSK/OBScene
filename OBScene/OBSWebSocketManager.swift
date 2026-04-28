@@ -1959,15 +1959,40 @@ enum OBSAppController {
                                 // quit or restarted again.
                                 SafeModeDialogDismisser.shared.cancelWatcher()
 
-                                // Restore the captured Space if the user has
-                                // the toggle on AND we have something to
-                                // restore. Runs in parallel with the post-
-                                // ready settle delay; both finish before the
-                                // restart-in-flight latch is cleared. We
-                                // resolve the new OBS pid via the relaunched
-                                // running app so we look up windows owned by
-                                // the freshly-spawned process, not the dead
-                                // pre-terminate one.
+                                // Step 7: kick off Space-restore (if enabled
+                                // and we captured a Space ID) AND the
+                                // post-ready settle delay in parallel. The
+                                // user's `beforeRun()` script fires only
+                                // after BOTH the 1.5s settle AND the Space
+                                // restore have terminated. This prevents:
+                                //   - Trigger actions / scripts racing
+                                //     against a still-pending window move,
+                                //     and
+                                //   - A follow-up restart firing on top of
+                                //     a Space restore that's still pending
+                                //     (e.g. OBS window slow to appear, up
+                                //     to `spaceRestoreWindowWaitSeconds`).
+                                //
+                                // Two latches that must both be released
+                                // before we clear `restartInFlight`:
+                                //   - `settleDone` flips at +1.5s.
+                                //   - `restoreDone` flips when SpaceManager
+                                //     either completes the move or times out
+                                //     waiting for the window. If Space
+                                //     restore is disabled / nothing to
+                                //     restore / no running app, it flips
+                                //     immediately.
+                                var settleDone = false
+                                var restoreDone = false
+                                var postRestartCompleted = false
+                                func tryClearLatch() {
+                                    guard !postRestartCompleted else { return }
+                                    guard settleDone, restoreDone else { return }
+                                    postRestartCompleted = true
+                                    Self.restartInFlight = false
+                                    beforeRun()
+                                }
+
                                 if let spaceID = capturedSpaceID,
                                    let app = runningApp ?? NSWorkspace.shared.runningApplications.first(where: {
                                        $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
@@ -1977,15 +2002,24 @@ enum OBSAppController {
                                         toSpace: spaceID,
                                         profileName: profileName,
                                         windowWaitTimeout: Self.spaceRestoreWindowWaitSeconds
-                                    )
+                                    ) {
+                                        // Already on main queue (SpaceManager
+                                        // hops to .main before invoking).
+                                        restoreDone = true
+                                        tryClearLatch()
+                                    }
+                                } else {
+                                    // Nothing to restore — release the
+                                    // restore latch immediately so the
+                                    // settle timer is the only gate.
+                                    restoreDone = true
                                 }
 
-                                // Step 7: settle delay so docks finish loading.
                                 DispatchQueue.main.asyncAfter(
                                     deadline: .now() + Self.postReadySettleSeconds
                                 ) {
-                                    Self.restartInFlight = false
-                                    beforeRun()
+                                    settleDone = true
+                                    tryClearLatch()
                                 }
                             }
                         }

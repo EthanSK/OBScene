@@ -806,10 +806,13 @@ struct SettingsView: View {
     private var generalGroup: some View {
         GroupBox(label: Label("General", systemImage: "gearshape")) {
             VStack(alignment: .leading, spacing: 6) {
-                Toggle("Launch at Login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { newValue in
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { newValue in
+                        launchAtLogin = newValue
                         setLaunchAtLogin(newValue)
                     }
+                ))
                 if let error = launchAtLoginError {
                     Text(error)
                         .font(.caption)
