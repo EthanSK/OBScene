@@ -1254,15 +1254,26 @@ enum OBScenePermissionKind: String {
 // full app restart is the only reliable way to make a dock pick up an updated
 // URL / cookie / channel after we change something externally.
 //
-// Sequence (when no recording/streaming is active):
+// Sequence:
 //   1. Pre-flight: ask OBS for GetStreamStatus + GetRecordStatus. If either
-//      is active, SKIP the restart entirely and just run the script — we
-//      never kill a live capture session.
+//      is active, fire StopStream / StopRecord via obs-websocket and poll
+//      until both report inactive (capped at ~20s — recording finalisation
+//      via obs-ffmpeg-mux can take a few seconds for large files). We do
+//      NOT auto-resume after restart — the user has to re-arm streaming /
+//      recording manually. If the stop never lands within the cap we abort
+//      the restart (we never kill a live capture session under us).
 //   2. Best-effort SaveSceneCollection so the relaunched OBS sees latest state.
 //   3. Graceful terminate() of the running OBS application (NOT SIGKILL —
-//      OBS needs to write its own config files cleanly).
-//   4. Poll until NSRunningApplication for that PID is gone, with a 15s cap.
-//      If it doesn't exit cleanly, abort and DO NOT run the script.
+//      OBS needs to write its own config files cleanly so the next launch
+//      doesn't show the "OBS Studio did not shut down properly" / safe-mode
+//      dialog).
+//   4. Poll until NSRunningApplication for that PID is gone, with a 30s cap
+//      (was 15s — bumped because OBS's clean-shutdown flag is only written
+//      AFTER it finishes flushing config + stopping outputs, and we'd
+//      occasionally time out before that completed). Checkpoint logs every
+//      5s so a future stuck-shutdown investigation can see where in the
+//      window we are. If it doesn't exit cleanly, abort and DO NOT run the
+//      script.
 //   5. Relaunch via NSWorkspace.shared.openApplication. macOS restores window
 //      position automatically because OBS persisted it on the graceful quit.
 //   6. Poll the OBS WebSocket with GetVersion until it answers, capped at 30s.
@@ -1287,8 +1298,20 @@ enum OBSAppController {
 
     /// Maximum time we'll wait for OBS to exit after sending terminate(),
     /// in seconds. After this we abort the restart (we do NOT escalate to
-    /// SIGKILL — that would risk corrupting OBS config files).
-    private static let terminateTimeoutSeconds: TimeInterval = 15.0
+    /// SIGKILL — that would risk corrupting OBS config files). Bumped from
+    /// 15s to 30s on 2026-04-27 because OBS only sets its "clean shutdown"
+    /// flag AFTER finishing config-file writes + output cleanup; the old
+    /// 15s window occasionally clipped that, leaving the next launch with
+    /// the "OBS Studio did not shut down properly" / safe-mode dialog.
+    private static let terminateTimeoutSeconds: TimeInterval = 30.0
+
+    /// Maximum time we'll wait for active StopStream / StopRecord calls to
+    /// land (i.e. for `getStreamingActive` / `getRecordingActive` to flip
+    /// back to false). The recording-stop path involves obs-ffmpeg-mux
+    /// finalising the on-disk file, which can take several seconds for
+    /// large recordings; 20s is conservative without making the user wait
+    /// forever on a broken OBS.
+    private static let stopOutputsTimeoutSeconds: TimeInterval = 20.0
 
     /// Maximum time we'll wait for the OBS WebSocket to come back up after
     /// we relaunch the app, in seconds.
@@ -1390,29 +1413,233 @@ enum OBSAppController {
             // initiate separate restarts.
             Self.restartInFlight = true
 
-            // Pre-flight: check streaming + recording state in parallel.
-            // We never restart while either is active.
-            Self.checkLiveSession(obs: obs) { isLive in
-                if isLive {
+            // Pre-flight: check streaming + recording state in parallel. If
+            // either is active we issue StopStream / StopRecord and wait for
+            // them to land before proceeding. The user is NOT auto-resumed
+            // after restart — that's a deliberate design choice (simple >
+            // smart for now).
+            Self.checkLiveSession(obs: obs) { state in
+                let proceed: () -> Void = {
+                    // Cleared for restart. Record timestamp for post-restart throttle.
+                    Self.lastRestartAt = Date()
+
+                    // Best-effort save of scene-collection state before quitting.
+                    Self.saveSceneCollectionBestEffort(obs: obs) {
+                        DispatchQueue.main.async {
+                            Self.performRestart(
+                                profileName: profileName,
+                                isSimulated: isSimulated,
+                                beforeRun: beforeRun
+                            )
+                        }
+                    }
+                }
+
+                switch state {
+                case .inactive:
+                    proceed()
+
+                case .unknown:
+                    // We couldn't determine state (request failed or timed
+                    // out). Safer to abort than to terminate OBS while it
+                    // might be live — log + run the script and bail.
                     ActivityLog.shared.log(.info,
-                        "OBS recording or streaming active — skipping restart, running script (\(profileName))")
+                        "OBS streaming/recording state unknown — aborting restart for safety, running script (\(profileName))")
                     Self.restartInFlight = false
                     beforeRun()
+
+                case .active(let streaming, let recording):
+                    let activeKinds = [
+                        streaming ? "streaming" : nil,
+                        recording ? "recording" : nil,
+                    ].compactMap { $0 }.joined(separator: " + ")
+                    ActivityLog.shared.log(.info,
+                        "OBS \(activeKinds) active — stopping before restart (\(profileName))")
+                    Self.stopOutputs(
+                        obs: obs,
+                        streaming: streaming,
+                        recording: recording,
+                        profileName: profileName
+                    ) { stopped in
+                        DispatchQueue.main.async {
+                            if !stopped {
+                                ActivityLog.shared.log(.info,
+                                    "OBS stop-outputs did not complete within \(Int(Self.stopOutputsTimeoutSeconds))s — aborting restart, running script (\(profileName))")
+                                Self.restartInFlight = false
+                                beforeRun()
+                                return
+                            }
+                            ActivityLog.shared.log(.info,
+                                "OBS stop-outputs complete, proceeding with restart (\(profileName))")
+                            proceed()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pre-flight outcome used by `restartOBS` to decide between proceeding,
+    /// aborting on unknown state, or stopping active outputs first.
+    private enum LiveState {
+        /// Neither streaming nor recording is active.
+        case inactive
+        /// We could not determine the state (request failed or timed out).
+        case unknown
+        /// At least one of streaming / recording is active. The associated
+        /// values are the individual flags so we know which Stop* requests
+        /// to issue.
+        case active(streaming: Bool, recording: Bool)
+    }
+
+    /// Issue StopStream / StopRecord for whichever output(s) the caller flagged
+    /// as active, then poll `getStreamingActive` / `getRecordingActive` until
+    /// both report false (or the timeout expires). `completion(true)` means
+    /// both reported inactive within the window; `completion(false)` means we
+    /// timed out (caller should abort the restart). All decision points log
+    /// to ActivityLog so a future stuck-stop investigation can see what
+    /// happened and when.
+    private static func stopOutputs(obs: OBSWebSocketManager,
+                                    streaming: Bool,
+                                    recording: Bool,
+                                    profileName: String,
+                                    completion: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async {
+            if streaming {
+                ActivityLog.shared.log(.info,
+                    "OBS StopStream invoked (\(profileName))")
+                obs.stopStreaming()
+            }
+            if recording {
+                ActivityLog.shared.log(.info,
+                    "OBS StopRecord invoked (\(profileName))")
+                obs.stopRecording()
+            }
+
+            let startedAt = Date()
+            let deadline = startedAt.addingTimeInterval(Self.stopOutputsTimeoutSeconds)
+            var lastLoggedStream: Bool? = nil
+            var lastLoggedRecord: Bool? = nil
+            var completed = false
+
+            func complete(_ stopped: Bool) {
+                guard !completed else { return }
+                completed = true
+                completion(stopped)
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.stopOutputsTimeoutSeconds) {
+                complete(false)
+            }
+
+            func tick() {
+                guard !completed else { return }
+                if Date() >= deadline {
+                    complete(false)
                     return
                 }
 
-                // Cleared for restart. Record timestamp for post-restart throttle.
-                Self.lastRestartAt = Date()
-
-                // Best-effort save of scene-collection state before quitting.
-                Self.saveSceneCollectionBestEffort(obs: obs) {
+                // Re-query state. We deliberately fire both probes regardless
+                // of which one was originally active — `getStreamingActive`
+                // and `getRecordingActive` are cheap and we want to make sure
+                // we don't accidentally proceed while one of them flipped on.
+                let requestTimeout = min(
+                    Self.restartRequestTimeoutSeconds,
+                    max(0.1, deadline.timeIntervalSinceNow)
+                )
+                Self.getOutputActivityWithTimeout(obs: obs, timeoutSeconds: requestTimeout) { streamingActive, recordingActive in
                     DispatchQueue.main.async {
-                        Self.performRestart(
-                            profileName: profileName,
-                            isSimulated: isSimulated,
-                            beforeRun: beforeRun
-                        )
+                        guard !completed else { return }
+                        if Date() >= deadline {
+                            complete(false)
+                            return
+                        }
+
+                        // Treat nil as "still active / unknown" so we
+                        // keep polling until the deadline rather than
+                        // racing past a transient request failure.
+                        let streamLive = streamingActive ?? true
+                        let recordLive = recordingActive ?? true
+
+                        // Log only on transition to keep the activity
+                        // log readable on slow muxer finalisations.
+                        if streamLive != lastLoggedStream {
+                            ActivityLog.shared.log(.info,
+                                "OBS streaming active = \(streamLive) (\(profileName))")
+                            lastLoggedStream = streamLive
+                        }
+                        if recordLive != lastLoggedRecord {
+                            ActivityLog.shared.log(.info,
+                                "OBS recording active = \(recordLive) (\(profileName))")
+                            lastLoggedRecord = recordLive
+                        }
+
+                        if !streamLive && !recordLive {
+                            let elapsed = Date().timeIntervalSince(startedAt)
+                            ActivityLog.shared.log(.info,
+                                "OBS outputs stopped after \(String(format: "%.1f", elapsed))s (\(profileName))")
+                            complete(true)
+                            return
+                        }
+
+                        // Still busy — schedule the next poll. 500ms
+                        // strikes a balance between responsiveness and
+                        // not hammering the WebSocket while obs-ffmpeg
+                        // is finalising a recording.
+                        let delay = min(0.5, max(0.0, deadline.timeIntervalSinceNow))
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            tick()
+                        }
                     }
+                }
+            }
+
+            tick()
+        }
+    }
+
+    private static func getOutputActivityWithTimeout(
+        obs: OBSWebSocketManager,
+        timeoutSeconds: TimeInterval,
+        completion: @escaping (Bool?, Bool?) -> Void
+    ) {
+        DispatchQueue.main.async {
+            var streamActive: Bool?
+            var streamDone = false
+            var recordActive: Bool?
+            var recordDone = false
+            var completed = false
+
+            func complete() {
+                guard !completed else { return }
+                completed = true
+                completion(streamDone ? streamActive : nil,
+                           recordDone ? recordActive : nil)
+            }
+
+            func finishIfReady() {
+                guard streamDone, recordDone else { return }
+                complete()
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
+                complete()
+            }
+
+            obs.getStreamingActive { active in
+                DispatchQueue.main.async {
+                    guard !completed else { return }
+                    streamActive = active
+                    streamDone = true
+                    finishIfReady()
+                }
+            }
+            obs.getRecordingActive { active in
+                DispatchQueue.main.async {
+                    guard !completed else { return }
+                    recordActive = active
+                    recordDone = true
+                    finishIfReady()
                 }
             }
         }
@@ -1441,12 +1668,21 @@ enum OBSAppController {
         }
     }
 
-    /// Dispatch streaming + recording status checks in parallel and call
-    /// `completion(true)` if either is active, `completion(false)` if both
-    /// are inactive. If a status request fails (returns nil), we treat that
-    /// as "active" — i.e. err on the side of NOT killing OBS.
+    /// Dispatch streaming + recording status checks in parallel and resolve
+    /// to a `LiveState` describing what the caller should do:
+    ///   - `.inactive`   — both probes returned `false`. Safe to restart.
+    ///   - `.active`     — at least one probe returned `true`. Caller should
+    ///                     stop the relevant outputs first.
+    ///   - `.unknown`    — at least one probe returned `nil` (request failed
+    ///                     or the 5s pre-flight cap fired). Caller should
+    ///                     abort the restart for safety.
+    ///
+    /// We deliberately distinguish unknown from active so the restart flow
+    /// can react differently: an active session is a clear "stop first" path,
+    /// while an unknown state means we have no signal about what's running
+    /// inside OBS and shouldn't gamble on terminating it.
     private static func checkLiveSession(obs: OBSWebSocketManager,
-                                         completion: @escaping (Bool) -> Void) {
+                                         completion: @escaping (LiveState) -> Void) {
         DispatchQueue.main.async {
             var streamActive: Bool?
             var streamDone = false
@@ -1454,22 +1690,31 @@ enum OBSAppController {
             var recordDone = false
             var completed = false
 
-            func complete(_ isLive: Bool) {
+            func complete(_ state: LiveState) {
                 guard !completed else { return }
                 completed = true
-                completion(isLive)
+                completion(state)
             }
 
             func finishIfReady() {
                 guard streamDone, recordDone else { return }
-                // `nil` means we couldn't determine state — treat as live.
-                complete((streamActive ?? true) || (recordActive ?? true))
+                // `nil` from either probe means we couldn't determine state.
+                // Surface that as `.unknown` so the caller aborts.
+                guard let streaming = streamActive, let recording = recordActive else {
+                    complete(.unknown)
+                    return
+                }
+                if streaming || recording {
+                    complete(.active(streaming: streaming, recording: recording))
+                } else {
+                    complete(.inactive)
+                }
             }
 
             // Hard cap on the pre-flight: if OBS doesn't reply within 5s,
-            // treat that as "live / unknown" and skip the restart.
+            // treat that as `.unknown` so the caller aborts the restart.
             DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
-                complete(true) // err on the side of caution
+                complete(.unknown)
             }
 
             obs.getStreamingActive { active in
@@ -1593,7 +1838,9 @@ enum OBSAppController {
         }
 
         // Step 4: poll until the PID is no longer reachable.
-        Self.pollForExit(pid: pid, deadline: Date().addingTimeInterval(Self.terminateTimeoutSeconds)) { exited in
+        Self.pollForExit(pid: pid,
+                         profileName: profileName,
+                         deadline: Date().addingTimeInterval(Self.terminateTimeoutSeconds)) { exited in
             DispatchQueue.main.async {
                 guard exited else {
                     let elapsed = Date().timeIntervalSince(quitStartedAt)
@@ -1690,14 +1937,29 @@ enum OBSAppController {
     /// Poll until `NSRunningApplication(processIdentifier:)` returns nil, or
     /// until `deadline`. Calls `completion(true)` if it exited in time,
     /// `completion(false)` on timeout. Polls on a background queue at 250ms.
+    /// Logs a checkpoint to ActivityLog every `checkpointInterval` so a
+    /// future stuck-shutdown investigation can see where in the wait window
+    /// we got stuck — useful when a clean OBS shutdown hangs on writing
+    /// config / finalising files.
     private static func pollForExit(pid: pid_t,
+                                    profileName: String,
                                     deadline: Date,
                                     completion: @escaping (Bool) -> Void) {
+        let startedAt = Date()
+        let checkpointInterval: TimeInterval = 5.0
         DispatchQueue.global().async {
+            var nextCheckpoint = startedAt.addingTimeInterval(checkpointInterval)
             while Date() < deadline {
                 if NSRunningApplication(processIdentifier: pid) == nil {
                     completion(true)
                     return
+                }
+                let now = Date()
+                if now >= nextCheckpoint {
+                    let waited = now.timeIntervalSince(startedAt)
+                    ActivityLog.shared.log(.info,
+                        "OBS still running \(String(format: "%.0f", waited))s after terminate() — continuing to wait (\(profileName))")
+                    nextCheckpoint = now.addingTimeInterval(checkpointInterval)
                 }
                 Thread.sleep(forTimeInterval: 0.25)
             }
