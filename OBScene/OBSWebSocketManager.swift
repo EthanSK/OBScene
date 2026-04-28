@@ -1274,6 +1274,14 @@ enum OBScenePermissionKind: String {
 //      5s so a future stuck-shutdown investigation can see where in the
 //      window we are. If it doesn't exit cleanly, abort and DO NOT run the
 //      script.
+//   4.5 Sweep stale `run_*` crash-sentinel files in
+//      `~/Library/Application Support/obs-studio/.sentinel/`. OBS removes
+//      these in the `applicationShutdownHandler` slot (wired to
+//      `OBSBasic::mainWindowClosed`), but in rare cases the host process
+//      exits before the FS write lands, leaving an orphaned sentinel that
+//      makes the next launch show the "did not shut down properly" /
+//      safe-mode dialog. Only fires when 0 OBS processes are running. See
+//      `sweepStaleCrashSentinels` for the safety contract.
 //   5. Relaunch via NSWorkspace.shared.openApplication. macOS restores window
 //      position automatically because OBS persisted it on the graceful quit.
 //   6. Poll the OBS WebSocket with GetVersion until it answers, capped at 30s.
@@ -1898,6 +1906,35 @@ enum OBSAppController {
                 ActivityLog.shared.log(.info,
                     "OBS terminated after \(String(format: "%.1f", elapsed))s — relaunching (\(profileName))")
 
+                // Step 4.5: sweep stale crash sentinels before relaunching.
+                //
+                // OBS writes a `run_<UUID>` file at
+                // `~/Library/Application Support/obs-studio/.sentinel/` on
+                // launch and removes ALL such files in
+                // `OBS::CrashHandler::applicationShutdownHandler` (wired up
+                // via the `OBSBasic::mainWindowClosed` signal). On a clean
+                // quit this fires correctly, but the cleanup is one of the
+                // last things to run during shutdown — well after the final
+                // log line we observe ("All scene data cleared"). In rare
+                // cases — observed in the wild on Ethan's machine — the
+                // host process exits (so `NSRunningApplication` reports it
+                // gone) before that filesystem write lands, leaving the
+                // sentinel orphaned. The next launch sees the orphan and
+                // shows the "OBS Studio did not shut down properly" /
+                // safe-mode dialog even though the previous quit was
+                // graceful.
+                //
+                // Mitigation: with OBS confirmed exited (pollForExit just
+                // returned true), and BEFORE we relaunch, sweep any stale
+                // `run_*` files. This is safe because we only run this
+                // immediately after `pollForExit` has confirmed OBS is gone,
+                // and we re-verify "no OBS running" inside the helper as a
+                // belt-and-braces defence against an OBS instance launched
+                // by something outside our control. If any OBS process IS
+                // running, we leave the directory alone — deleting a live
+                // sentinel would mask a real future crash.
+                Self.sweepStaleCrashSentinels(profileName: profileName)
+
                 // Step 5: relaunch.
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = false
@@ -2062,6 +2099,111 @@ enum OBSAppController {
             // past the deadline.
             completion(NSRunningApplication(processIdentifier: pid) == nil)
         }
+    }
+
+    /// Path to the OBS crash-sentinel directory, in user Application Support.
+    /// Computed (not stored) because the user's home directory is queried via
+    /// `FileManager` and would, in principle, be cheap to recompute — and
+    /// returning a fresh `URL` each time avoids any test-time caching.
+    private static func crashSentinelDirectoryURL() -> URL? {
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return nil
+        }
+        return appSupport
+            .appendingPathComponent("obs-studio", isDirectory: true)
+            .appendingPathComponent(".sentinel", isDirectory: true)
+    }
+
+    /// Sweep stale `run_*` crash-sentinel files in
+    /// `~/Library/Application Support/obs-studio/.sentinel/` to suppress the
+    /// "OBS Studio did not shut down properly" dialog after a graceful
+    /// `terminate()`-initiated restart.
+    ///
+    /// Safety contract — only ever called from `performRestart` AFTER
+    /// `pollForExit` has confirmed OBS is gone, BEFORE we relaunch. As a
+    /// belt-and-braces defence we also re-check `NSRunningApplication` for any
+    /// other live OBS instance and bail out without deleting if we find one
+    /// (we never want to mask a real crash on a separate OBS instance the
+    /// user might have running outside our control).
+    ///
+    /// Defensive against a missing sentinel dir (OBS never run) and against
+    /// filesystem errors (logged + swallowed; we don't fail the restart over
+    /// a sentinel sweep). OBScene runs un-sandboxed (see
+    /// `OBScene.entitlements`), so the path is reachable; if a future build
+    /// turns sandboxing on, the read enumeration will silently no-op and we
+    /// log + skip without crashing.
+    private static func sweepStaleCrashSentinels(profileName: String) {
+        // Re-verify no OBS is running. `performRestart` already polled until
+        // exit, but a separate OBS process (different bundle copy, different
+        // user-launched instance) is theoretically possible. If ANY OBS is
+        // up, bail — we'd risk deleting a live sentinel.
+        let liveOBSCount = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+        }.count
+        if liveOBSCount > 0 {
+            ActivityLog.shared.log(.info,
+                "Skipping crash-sentinel sweep — \(liveOBSCount) OBS process(es) still running (\(profileName))")
+            return
+        }
+
+        guard let sentinelDir = Self.crashSentinelDirectoryURL() else {
+            ActivityLog.shared.log(.info,
+                "Crash-sentinel sweep: could not resolve Application Support directory (\(profileName))")
+            return
+        }
+
+        // The directory may legitimately not exist if OBS has never been
+        // launched on this machine (or has been freshly reset). Treat that
+        // as "nothing to sweep" — log at info so a future investigator can
+        // tell the difference between "no dir" and "empty dir".
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: sentinelDir.path,
+            isDirectory: &isDir
+        )
+        guard exists, isDir.boolValue else {
+            ActivityLog.shared.log(.info,
+                "Crash-sentinel sweep: directory \(sentinelDir.path) does not exist — skipping (\(profileName))")
+            return
+        }
+
+        let entries: [URL]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(
+                at: sentinelDir,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            ActivityLog.shared.log(.info,
+                "Crash-sentinel sweep: failed to list \(sentinelDir.path): \(error.localizedDescription) (\(profileName))")
+            return
+        }
+
+        let sentinelFiles = entries.filter { $0.lastPathComponent.hasPrefix("run_") }
+        guard !sentinelFiles.isEmpty else {
+            ActivityLog.shared.log(.info,
+                "Crash-sentinel sweep: 0 stale sentinels found (\(profileName))")
+            return
+        }
+
+        var deleted = 0
+        var failed = 0
+        for fileURL in sentinelFiles {
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+                deleted += 1
+            } catch {
+                failed += 1
+                ActivityLog.shared.log(.info,
+                    "Crash-sentinel sweep: failed to delete \(fileURL.lastPathComponent): \(error.localizedDescription) (\(profileName))")
+            }
+        }
+        ActivityLog.shared.log(.info,
+            "Crash-sentinel sweep: deleted \(deleted)/\(sentinelFiles.count) stale sentinel(s)\(failed > 0 ? ", \(failed) failed" : "") (\(profileName))")
     }
 
     /// Poll the OBS WebSocket by issuing GetVersion every 1s (after waiting
