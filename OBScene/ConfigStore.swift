@@ -31,33 +31,150 @@ struct ActivityEvent: Identifiable, Equatable {
             case .info: return "info.circle"
             }
         }
+
+        /// Default user-visibility for each kind. Hardware-edge events,
+        /// trigger lifecycle, and OBS output start events are all "things a
+        /// streamer cares about" by default; `.info` is verbose / debug
+        /// telemetry that lives in the file log unless the caller explicitly
+        /// asks for `userVisible: true`.
+        var defaultUserVisible: Bool {
+            switch self {
+            case .displayConnected, .displayDisconnected,
+                 .usbDeviceConnected, .usbDeviceDisconnected,
+                 .triggerScheduled, .triggerFired,
+                 .recordingStarted, .streamingStarted,
+                 .virtualCamStarted, .replayBufferStarted:
+                return true
+            case .info:
+                return false
+            }
+        }
     }
 
     let id = UUID()
     let kind: Kind
     let message: String
     let timestamp: Date
+    /// Whether this event surfaces in the Settings → Activity tab. The file
+    /// log + verbose toggle still see it regardless. False for the noisy
+    /// debug checkpoints (terminate-poll, sentinel sweep details, etc.).
+    let isUserVisible: Bool
 
     static func == (lhs: ActivityEvent, rhs: ActivityEvent) -> Bool {
         lhs.id == rhs.id
     }
 }
 
+/// In-process activity log used by both the Settings → Activity tab
+/// (filtered to user-visible events) and the on-disk debug log
+/// (`~/Library/Logs/OBScene/activity.log`, every event).
+///
+/// The "Activity" tab is a streamer-facing surface — it must stay short and
+/// scannable, so most callsites should stick to the default user-visibility
+/// of their `Kind`. Use `userVisible: true` to elevate a specific `.info`
+/// log to the tab when it conveys a high-level state change a user cares
+/// about (e.g. "OBS restart succeeded", "USB device matched profile X").
 class ActivityLog: ObservableObject {
     static let shared = ActivityLog()
 
+    /// Every event, including verbose `.info` debug checkpoints. Bounded at
+    /// `maxEvents` for memory safety; the file log is unbounded (rotated by
+    /// macOS log rotation, same as `script-runs.log`).
     @Published private(set) var events: [ActivityEvent] = []
-    private let maxEvents = 20
+    /// Subset of `events` where `isUserVisible == true`. Cached so the
+    /// SwiftUI list doesn't re-filter on every render.
+    @Published private(set) var userVisibleEvents: [ActivityEvent] = []
+
+    private let maxEvents = 200
+    private let maxUserVisibleEvents = 20
+
+    /// Path to the verbose activity log file. Lives next to
+    /// `script-runs.log` so the existing "Open Logs" button can reach it
+    /// (and so users have one consistent location for OBScene's debug
+    /// telemetry). Created lazily on first write.
+    static var logFileURL: URL {
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("OBScene", isDirectory: true)
+        return logs.appendingPathComponent("activity.log", isDirectory: false)
+    }
+
+    /// Serial queue for log-file appends. Multiple log() callers may fire
+    /// from different threads; funnelling writes here keeps the file
+    /// readable.
+    private let logFileQueue = DispatchQueue(
+        label: "com.ethansk.OBScene.ActivityLog.file"
+    )
+
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     private init() {}
 
-    func log(_ kind: ActivityEvent.Kind, _ message: String) {
-        let event = ActivityEvent(kind: kind, message: message, timestamp: Date())
+    /// Append an event to the activity log. `userVisible` defaults to the
+    /// kind's `defaultUserVisible`; pass `true` to elevate a `.info`
+    /// message to the user-facing Activity tab, or `false` to demote a
+    /// hardware-edge event to file-only (rarely needed).
+    func log(_ kind: ActivityEvent.Kind,
+             _ message: String,
+             userVisible: Bool? = nil) {
+        let resolvedUserVisible = userVisible ?? kind.defaultUserVisible
+        let event = ActivityEvent(
+            kind: kind,
+            message: message,
+            timestamp: Date(),
+            isUserVisible: resolvedUserVisible
+        )
+        appendToFile(event)
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.events.insert(event, at: 0)
             if self.events.count > self.maxEvents {
                 self.events.removeLast(self.events.count - self.maxEvents)
+            }
+            if event.isUserVisible {
+                self.userVisibleEvents.insert(event, at: 0)
+                if self.userVisibleEvents.count > self.maxUserVisibleEvents {
+                    self.userVisibleEvents.removeLast(
+                        self.userVisibleEvents.count - self.maxUserVisibleEvents
+                    )
+                }
+            }
+        }
+    }
+
+    /// Best-effort append to the on-disk activity log. Errors are swallowed
+    /// — this is debug telemetry, not a correctness path; failing to write
+    /// must never block the UI thread or the trigger pipeline. Hops to a
+    /// serial background queue so the main thread isn't stalled by disk
+    /// I/O on burst events.
+    private func appendToFile(_ event: ActivityEvent) {
+        let ts = Self.isoFormatter.string(from: event.timestamp)
+        let visibility = event.isUserVisible ? "user" : "debug"
+        let line = "[\(ts)] [\(visibility)] [\(event.kind)] \(event.message)\n"
+        let url = Self.logFileURL
+        logFileQueue.async {
+            // Make sure the directory and file exist before opening for
+            // append. Mirrors ScriptRunner.ensureLogFileExists() but kept
+            // private here so ActivityLog has no dependency on
+            // ScriptRunner's internals.
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                _ = try? data.write(to: url, options: .atomic)
             }
         }
     }

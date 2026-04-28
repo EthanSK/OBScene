@@ -197,7 +197,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var firedIDs = usbFiredPlugInProfiles[deviceKey] ?? []
         for profile in plugInProfiles {
             print("[OBScene] USB device '\(deviceName)' (labels=\(volumeLabels)) matched plug-in profile '\(profile.name)'")
-            ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)'")
+            ActivityLog.shared.log(.info,
+                "USB device '\(deviceName)' matched profile '\(profile.name)'",
+                userVisible: true)
             displayMonitor.scheduleUSBTrigger(for: profile)
             firedIDs.insert(profile.id)
         }
@@ -242,7 +244,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var firedIDs = alreadyFired
         for profile in plugInProfiles {
             print("[OBScene] USB device '\(deviceName)' (late labels=\(volumeLabels)) matched plug-in profile '\(profile.name)'")
-            ActivityLog.shared.log(.info, "USB device '\(deviceName)' matched profile '\(profile.name)' (via volume label)")
+            ActivityLog.shared.log(.info,
+                "USB device '\(deviceName)' matched profile '\(profile.name)' (via volume label)",
+                userVisible: true)
             displayMonitor.scheduleUSBTrigger(for: profile)
             firedIDs.insert(profile.id)
         }
@@ -271,7 +275,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         for profile in plugOutProfiles {
             print("[OBScene] USB device '\(deviceName)' (labels=\(volumeLabels)) gone — plug-out profile '\(profile.name)'")
-            ActivityLog.shared.log(.info, "USB device '\(deviceName)' disconnected (\(profile.name))")
+            ActivityLog.shared.log(.info,
+                "USB device '\(deviceName)' disconnected (\(profile.name))",
+                userVisible: true)
             displayMonitor.scheduleUSBTrigger(for: profile)
         }
 
@@ -645,8 +651,11 @@ extension AppDelegate {
         obsManager.profiles = ["Untitled"]
         obsManager.scenes = ["Scene"]
 
-        ActivityLog.shared.log(.info, "OBScene started")
-        ActivityLog.shared.log(.info, "Connected to OBS WebSocket")
+        // Demo data for the offscreen render. Force user-visible so the
+        // sample Activity tab in the README screenshot shows the curated
+        // streamer-facing surface (not the noisy debug feed).
+        ActivityLog.shared.log(.info, "OBScene started", userVisible: true)
+        ActivityLog.shared.log(.info, "Connected to OBS WebSocket", userVisible: true)
         ActivityLog.shared.log(.displayConnected, "External display connected (1 of 1)")
         ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in 5s")
         ActivityLog.shared.log(.triggerFired, "Switched to scene 'Scene'")

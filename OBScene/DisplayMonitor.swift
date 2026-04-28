@@ -114,7 +114,13 @@ class DisplayMonitor {
                     if triggerWorkItems[profile.id] != nil {
                         cancelPendingTrigger(for: profile.id)
                         OBSWebSocketManager.shared.cancelInflightEnsureConnected()
-                        ActivityLog.shared.log(.info, "Pending trigger cancelled (\(profile.name))")
+                        // Pair with the user-visible "Trigger scheduled" log
+                        // so a user staring at the Activity tab sees the
+                        // schedule → cancel → (no fire) story instead of a
+                        // dangling "scheduled" line.
+                        ActivityLog.shared.log(.info,
+                            "Pending trigger cancelled (\(profile.name))",
+                            userVisible: true)
                     }
                 }
             case .plugOut:
@@ -126,7 +132,12 @@ class DisplayMonitor {
                     // came back before the delay elapsed — cancel.
                     if triggerWorkItems[profile.id] != nil {
                         cancelPendingTrigger(for: profile.id)
-                        ActivityLog.shared.log(.info, "Pending plug-out trigger cancelled (\(profile.name))")
+                        // Same pairing logic as the plug-in cancel above —
+                        // the user saw "scheduled", they should see
+                        // "cancelled" too.
+                        ActivityLog.shared.log(.info,
+                            "Pending plug-out trigger cancelled (\(profile.name))",
+                            userVisible: true)
                     }
                 }
             }
@@ -266,7 +277,11 @@ class DisplayMonitor {
     func cancelUSBPendingTrigger(for profile: TriggerProfile) {
         if triggerWorkItems[profile.id] != nil {
             cancelPendingTrigger(for: profile.id)
-            ActivityLog.shared.log(.info, "Pending USB trigger cancelled (\(profile.name))")
+            // Pair with the user-visible "USB trigger scheduled" log so the
+            // schedule → cancel pair stays consistent in the Activity tab.
+            ActivityLog.shared.log(.info,
+                "Pending USB trigger cancelled (\(profile.name))",
+                userVisible: true)
         }
     }
 
@@ -280,7 +295,13 @@ class DisplayMonitor {
     /// AE blocked, websocket-ready timeout, etc.).
     func runTestTrigger(for profile: TriggerProfile) {
         cancelPendingTrigger(for: profile.id)
-        ActivityLog.shared.log(.info, "Test trigger requested (\(profile.name))")
+        // Surface the simulate-click in the user-facing Activity tab so a
+        // dry-run on a script-only profile (which never reaches the
+        // .triggerFired log because `runTriggerActions` is skipped) still
+        // shows feedback in the default (non-verbose) view.
+        ActivityLog.shared.log(.info,
+            "Test trigger requested (\(profile.name))",
+            userVisible: true)
         executeTrigger(for: profile.id, isSimulated: true)
     }
 
@@ -362,8 +383,12 @@ class DisplayMonitor {
         // the original synchronous behaviour.
         if hasScript && profile.restartOBSBeforeRun {
             if profile.runScriptBeforeRestart {
-                ActivityLog.shared.log(.info, "Run-script-before-restart requested (\(profile.name))")
-                ActivityLog.shared.log(.info, "Running profile script and waiting for exit (\(profile.name))")
+                ActivityLog.shared.log(.info,
+                    "Run-script-before-restart requested (\(profile.name))",
+                    userVisible: true)
+                ActivityLog.shared.log(.info,
+                    "Running profile script and waiting for exit (\(profile.name))",
+                    userVisible: true)
                 let scriptStartedAt = Date()
                 ScriptRunner.runAndWait(
                     script: profile.runScript,
@@ -372,19 +397,28 @@ class DisplayMonitor {
                 ) { [weak self] outcome in
                     guard let self = self else { return }
                     let elapsed = Date().timeIntervalSince(scriptStartedAt)
+                    // Pair every script-outcome with the user-visible
+                    // "Running profile script and waiting…" start line so
+                    // the Activity tab shows the script's actual fate
+                    // (status / signal / failed-to-launch / timed-out) and
+                    // not a half-told story.
                     switch outcome {
                     case .exited(let status):
                         ActivityLog.shared.log(.info,
-                            "Script finished in \(String(format: "%.1f", elapsed))s with status \(status) — proceeding with restart (\(profile.name))")
+                            "Script finished in \(String(format: "%.1f", elapsed))s with status \(status) — proceeding with restart (\(profile.name))",
+                            userVisible: true)
                     case .signalled(let signal):
                         ActivityLog.shared.log(.info,
-                            "Script terminated by signal \(signal) after \(String(format: "%.1f", elapsed))s — proceeding with restart (\(profile.name))")
+                            "Script terminated by signal \(signal) after \(String(format: "%.1f", elapsed))s — proceeding with restart (\(profile.name))",
+                            userVisible: true)
                     case .failedToLaunch(let reason):
                         ActivityLog.shared.log(.info,
-                            "Script failed to launch (\(reason)) — proceeding with restart (\(profile.name))")
+                            "Script failed to launch (\(reason)) — proceeding with restart (\(profile.name))",
+                            userVisible: true)
                     case .timedOut:
                         ActivityLog.shared.log(.info,
-                            "Script still running after \(Int(Self.scriptBeforeRestartTimeout))s timeout — leaving it detached and proceeding with restart (\(profile.name))")
+                            "Script still running after \(Int(Self.scriptBeforeRestartTimeout))s timeout — leaving it detached and proceeding with restart (\(profile.name))",
+                            userVisible: true)
                     }
 
                     // Restart with a no-op `beforeRun` — the script has already
@@ -409,10 +443,14 @@ class DisplayMonitor {
                 return
             }
 
-            ActivityLog.shared.log(.info, "Restart-before-run requested (\(profile.name))")
+            ActivityLog.shared.log(.info,
+                "Restart-before-run requested (\(profile.name))",
+                userVisible: true)
             OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
                 guard let self = self else { return }
-                ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
+                ActivityLog.shared.log(.info,
+                    "Running profile script (\(profile.name))",
+                    userVisible: true)
                 ScriptRunner.run(script: profile.runScript, profileName: profile.name)
 
                 // Same script-only fast-path check as the synchronous branch.
@@ -430,7 +468,9 @@ class DisplayMonitor {
         }
 
         if hasScript {
-            ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
+            ActivityLog.shared.log(.info,
+                "Running profile script (\(profile.name))",
+                userVisible: true)
             ScriptRunner.run(script: profile.runScript, profileName: profile.name)
         }
 
@@ -465,7 +505,9 @@ class DisplayMonitor {
         // Not connected. Try to auto-launch OBS.
         guard config.hasBeenConfigured, !config.obsHost.isEmpty else {
             print("[OBScene] Trigger fired but OBS connection is not configured")
-            ActivityLog.shared.log(.info, "Trigger fired, but OBS not configured (\(profile.name))")
+            ActivityLog.shared.log(.info,
+                "Trigger fired, but OBS not configured (\(profile.name))",
+                userVisible: true)
             return
         }
 
@@ -490,21 +532,27 @@ class DisplayMonitor {
                     print("[OBScene] Auto-launch cancelled for '\(profile.name)'")
                 case .obsNotInstalled:
                     print("[OBScene] OBS is not installed")
-                    ActivityLog.shared.log(.info, "OBS is not installed")
+                    ActivityLog.shared.log(.info,
+                        "OBS is not installed",
+                        userVisible: true)
                     UserNotifier.post(
                         title: "OBScene: OBS not installed",
                         body: "OBS Studio isn't installed on this Mac. Download it from obsproject.com/download."
                     )
                 case .autoLaunchDisabled:
                     print("[OBScene] Trigger fired but OBS is not running and auto-launch is disabled")
-                    ActivityLog.shared.log(.info, "OBS not running and auto-launch disabled")
+                    ActivityLog.shared.log(.info,
+                        "OBS not running and auto-launch disabled",
+                        userVisible: true)
                     UserNotifier.post(
                         title: "OBScene: OBS not running",
                         body: "Enable auto-launch in Settings or start OBS manually."
                     )
                 case .websocketUnavailable:
                     print("[OBScene] OBS is up but WebSocket didn't become available in time")
-                    ActivityLog.shared.log(.info, "OBS WebSocket did not respond in time")
+                    ActivityLog.shared.log(.info,
+                        "OBS WebSocket did not respond in time",
+                        userVisible: true)
                     UserNotifier.post(
                         title: "OBScene: couldn't connect to OBS",
                         body: "OBS is running but its WebSocket server didn't respond. Enable it in Tools → WebSocket Server Settings."

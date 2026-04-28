@@ -551,7 +551,9 @@ final class SafeModeDialogDismisser {
         lock.unlock()
 
         if !alreadyPosted {
-            ActivityLog.shared.log(.info, "Accessibility permission required to auto-dismiss OBS Safe Mode dialog")
+            ActivityLog.shared.log(.info,
+                "Accessibility permission required to auto-dismiss OBS Safe Mode dialog",
+                userVisible: true)
             UserNotifier.post(
                 title: "Accessibility permission needed",
                 body: "OBScene needs Accessibility permission to auto-dismiss OBS's Safe Mode dialog. Enable it in System Settings → Privacy & Security → Accessibility."

@@ -837,7 +837,9 @@ class OBSWebSocketManager: ObservableObject {
                   let allInputs = data["inputs"] as? [[String: Any]] else {
                 print("[OBScene] Failed to get browser source list from OBS")
                 DispatchQueue.main.async {
-                    ActivityLog.shared.log(.info, "Failed to list OBS browser sources")
+                    ActivityLog.shared.log(.info,
+                        "Failed to list OBS browser sources",
+                        userVisible: true)
                 }
                 return
             }
@@ -853,7 +855,9 @@ class OBSWebSocketManager: ObservableObject {
             if browserInputs.isEmpty {
                 print("[OBScene] No browser sources found in OBS")
                 DispatchQueue.main.async {
-                    ActivityLog.shared.log(.info, "No OBS browser sources to refresh")
+                    ActivityLog.shared.log(.info,
+                        "No OBS browser sources to refresh",
+                        userVisible: true)
                 }
                 return
             }
@@ -862,7 +866,9 @@ class OBSWebSocketManager: ObservableObject {
             let names = browserInputs.compactMap { $0["inputName"] as? String }
             print("[OBScene] Refreshing \(total) OBS browser source(s): \(names.joined(separator: ", "))")
             DispatchQueue.main.async {
-                ActivityLog.shared.log(.info, "Refreshing \(total) OBS browser source(s)")
+                ActivityLog.shared.log(.info,
+                    "Refreshing \(total) OBS browser source(s)",
+                    userVisible: true)
             }
 
             // Fire a refresh for each source independently. The OBS WebSocket
@@ -1384,22 +1390,29 @@ enum OBSAppController {
                            isSimulated: Bool = false,
                            beforeRun: @escaping () -> Void) {
         DispatchQueue.main.async {
-            // Throttle: a recent or in-flight restart short-circuits.
+            // Throttle: a recent or in-flight restart short-circuits. Both
+            // outcomes are user-visible so the Activity tab can explain
+            // why a restart didn't happen — pairs with the "restart
+            // requested" line that fires below on the non-throttled path.
             if Self.restartInFlight {
                 ActivityLog.shared.log(.info,
-                    "OBS restart already in progress (\(profileName)) — skipping restart, running script")
+                    "OBS restart already in progress (\(profileName)) — skipping restart, running script",
+                    userVisible: true)
                 beforeRun()
                 return
             }
             if let last = Self.lastRestartAt,
                Date().timeIntervalSince(last) < Self.throttleWindow {
                 ActivityLog.shared.log(.info,
-                    "OBS restart throttled (last was <\(Int(Self.throttleWindow))s ago, \(profileName)) — running script")
+                    "OBS restart throttled (last was <\(Int(Self.throttleWindow))s ago, \(profileName)) — running script",
+                    userVisible: true)
                 beforeRun()
                 return
             }
 
-            ActivityLog.shared.log(.info, "OBS restart requested for profile \(profileName)")
+            ActivityLog.shared.log(.info,
+                "OBS restart requested for profile \(profileName)",
+                userVisible: true)
 
             let obs = OBSWebSocketManager.shared
 
@@ -1408,7 +1421,8 @@ enum OBSAppController {
             // existing trigger pipeline downstream.
             guard obs.isOBSRunning() else {
                 ActivityLog.shared.log(.info,
-                    "OBS not running — skipping restart, running script (\(profileName))")
+                    "OBS not running — skipping restart, running script (\(profileName))",
+                    userVisible: true)
                 beforeRun()
                 return
             }
@@ -1419,7 +1433,8 @@ enum OBSAppController {
             // effect still happens.
             guard obs.isConnected else {
                 ActivityLog.shared.log(.info,
-                    "OBS not connected to WebSocket — skipping restart for safety, running script (\(profileName))")
+                    "OBS not connected to WebSocket — skipping restart for safety, running script (\(profileName))",
+                    userVisible: true)
                 beforeRun()
                 return
             }
@@ -1459,8 +1474,11 @@ enum OBSAppController {
                     // We couldn't determine state (request failed or timed
                     // out). Safer to abort than to terminate OBS while it
                     // might be live — log + run the script and bail.
+                    // User-visible so the Activity tab explains why the
+                    // restart didn't actually happen.
                     ActivityLog.shared.log(.info,
-                        "OBS streaming/recording state unknown — aborting restart for safety, running script (\(profileName))")
+                        "OBS streaming/recording state unknown — aborting restart for safety, running script (\(profileName))",
+                        userVisible: true)
                     Self.restartInFlight = false
                     beforeRun()
 
@@ -1469,8 +1487,11 @@ enum OBSAppController {
                         streaming ? "streaming" : nil,
                         recording ? "recording" : nil,
                     ].compactMap { $0 }.joined(separator: " + ")
+                    // User-visible: tells the user OBScene is gracefully
+                    // stopping a live capture before restarting OBS.
                     ActivityLog.shared.log(.info,
-                        "OBS \(activeKinds) active — stopping before restart (\(profileName))")
+                        "OBS \(activeKinds) active — stopping before restart (\(profileName))",
+                        userVisible: true)
                     Self.stopOutputs(
                         obs: obs,
                         streaming: streaming,
@@ -1479,8 +1500,13 @@ enum OBSAppController {
                     ) { stopped in
                         DispatchQueue.main.async {
                             if !stopped {
+                                // User-visible: if the user has streaming/
+                                // recording active and the stop-outputs
+                                // dance times out, we abort the restart
+                                // and they need to know why.
                                 ActivityLog.shared.log(.info,
-                                    "OBS stop-outputs did not complete within \(Int(Self.stopOutputsTimeoutSeconds))s — aborting restart, running script (\(profileName))")
+                                    "OBS stop-outputs did not complete within \(Int(Self.stopOutputsTimeoutSeconds))s — aborting restart, running script (\(profileName))",
+                                    userVisible: true)
                                 Self.restartInFlight = false
                                 beforeRun()
                                 return
@@ -1767,8 +1793,12 @@ enum OBSAppController {
         guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
         }) else {
+            // User-visible: paired with the "OBS restart requested" line
+            // so the tab shows the user what actually happened to that
+            // request.
             ActivityLog.shared.log(.info,
-                "OBS no longer running at restart step — running script (\(profileName))")
+                "OBS no longer running at restart step — running script (\(profileName))",
+                userVisible: true)
             Self.restartInFlight = false
             beforeRun()
             return
@@ -1776,7 +1806,8 @@ enum OBSAppController {
         let pid = runningApp.processIdentifier
         guard let obsAppURL = obs.obsApplicationURL() else {
             ActivityLog.shared.log(.info,
-                "OBS app bundle not resolvable — aborting restart (\(profileName))")
+                "OBS app bundle not resolvable — aborting restart (\(profileName))",
+                userVisible: true)
             Self.restartInFlight = false
             // We never quit OBS here — we just couldn't resolve the bundle URL
             // for the relaunch step. Run the script anyway (for real and
@@ -1835,8 +1866,13 @@ enum OBSAppController {
         let quitStartedAt = Date()
         let didTerminate = runningApp.terminate()
         if !didTerminate {
+            // User-visible failure: terminate() refused outright (usually
+            // the AE round-trip failed because TCC dropped the quit
+            // event). The Settings layer also raises a permission alert,
+            // but the Activity tab should still record what happened.
             ActivityLog.shared.log(.info,
-                "OBS terminate() returned false — aborting restart (\(profileName))")
+                "OBS terminate() returned false — aborting restart (\(profileName))",
+                userVisible: true)
             // terminate() returning false generally means the AE round-trip
             // failed outright (target gone or refused). We can't tell from
             // the Cocoa API whether that was TCC vs. some other reason, so
@@ -1876,7 +1912,8 @@ enum OBSAppController {
             // unnecessary alert (acceptable false-positive trade-off).
             guard Self.restartInFlight, !probeRunningApp.isTerminated else { return }
             ActivityLog.shared.log(.info,
-                "OBS still running \(Int(Self.permissionDenialDetectionSeconds))s after terminate() — suspecting Automation permission denied (\(profileName))")
+                "OBS still running \(Int(Self.permissionDenialDetectionSeconds))s after terminate() — suspecting Automation permission denied (\(profileName))",
+                userVisible: true)
             Self.postPermissionDenied(
                 kind: .automation,
                 targetName: "OBS Studio",
@@ -1892,7 +1929,8 @@ enum OBSAppController {
                 guard exited else {
                     let elapsed = Date().timeIntervalSince(quitStartedAt)
                     ActivityLog.shared.log(.info,
-                        "OBS did not exit within \(Int(Self.terminateTimeoutSeconds))s (elapsed \(String(format: "%.1f", elapsed))s) — aborting restart (\(profileName))")
+                        "OBS did not exit within \(Int(Self.terminateTimeoutSeconds))s (elapsed \(String(format: "%.1f", elapsed))s) — aborting restart (\(profileName))",
+                        userVisible: true)
                     Self.restartInFlight = false
                     restoreWebSocketAfterAbort()
                     // Real triggers abort the whole flow on a failed restart
@@ -1944,7 +1982,8 @@ enum OBSAppController {
                     DispatchQueue.main.async {
                         if let error = error {
                             ActivityLog.shared.log(.info,
-                                "OBS relaunch failed: \(error.localizedDescription) (\(profileName))")
+                                "OBS relaunch failed: \(error.localizedDescription) (\(profileName))",
+                                userVisible: true)
                             Self.restartInFlight = false
                             restoreWebSocketAfterAbort()
                             // Simulate Trigger still runs the script even
@@ -1975,7 +2014,8 @@ enum OBSAppController {
                             DispatchQueue.main.async {
                                 guard ready else {
                                     ActivityLog.shared.log(.info,
-                                        "OBS websocket did not come up within \(Int(Self.websocketReadyTimeoutSeconds))s — aborting (\(profileName))")
+                                        "OBS websocket did not come up within \(Int(Self.websocketReadyTimeoutSeconds))s — aborting (\(profileName))",
+                                        userVisible: true)
                                     Self.restartInFlight = false
                                     // Simulate Trigger still runs the script
                                     // even when the websocket never came back
@@ -1984,7 +2024,8 @@ enum OBSAppController {
                                     return
                                 }
                                 ActivityLog.shared.log(.info,
-                                    "OBS ready, running script (\(profileName))")
+                                    "OBS ready, running script (\(profileName))",
+                                    userVisible: true)
                                 // The Safe Mode dialog (if it was going to
                                 // appear) blocks OBS's UI thread BEFORE the
                                 // WebSocket server starts accepting

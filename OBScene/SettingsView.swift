@@ -23,6 +23,15 @@ struct SettingsView: View {
     /// Privacy & Security pane.
     @State private var permissionAlert: PermissionAlertInfo?
 
+    /// When true, the Activity tab renders every event in `activityLog.events`
+    /// (including verbose `.info` debug checkpoints from the OBS-restart
+    /// pipeline, sentinel sweeps, etc.). When false (default), only events
+    /// with `isUserVisible == true` are shown, keeping the tab focused on
+    /// streamer-facing state changes. The setting is in-memory only — it
+    /// resets each time the Settings window is opened, so a power user can
+    /// briefly flip it on for debugging without polluting the long-term UX.
+    @State private var activityVerbose: Bool = false
+
     /// Snapshot of the data needed to render and act on the permission alert.
     /// Identifiable so SwiftUI's `.alert(item:)` re-fires when a fresh
     /// notification arrives even if a previous one was dismissed for the
@@ -920,32 +929,47 @@ struct SettingsView: View {
     }
 
     private var activitySection: some View {
-        GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
+        // Decide which slice of the activity log to render. `userVisibleEvents`
+        // is the curated streamer-facing view (USB plug, trigger fired, OBS
+        // restart succeeded, etc.); `events` is the full debug feed including
+        // pollForExit checkpoints, sentinel sweep details, SkyLight
+        // diagnostics — the kind of stuff that lives in the file log
+        // (~/Library/Logs/OBScene/activity.log) for after-the-fact debug.
+        let visibleEvents = activityVerbose
+            ? activityLog.events
+            : activityLog.userVisibleEvents
+        let renderLimit = activityVerbose ? 30 : 12
+
+        return GroupBox(label: Label("Activity", systemImage: "clock.arrow.circlepath")) {
             VStack(alignment: .leading, spacing: 8) {
-                // "Open Logs" handed Ethan the script-runs.log file (the
-                // same path mentioned in the per-profile script help text)
-                // so he can audit shell output without spelunking through
-                // ~/Library/Logs. We don't force Console.app — handing the
-                // URL to NSWorkspace lets the user's default `.log` editor
-                // open it (Console.app, BBEdit, VS Code, whatever).
+                // Verbose toggle (left) + Open Logs button (right). Verbose
+                // flips the list to show every event including debug
+                // checkpoints; Open Logs hands the on-disk activity.log to
+                // the user's default `.log` editor for full-history debug.
                 HStack {
+                    Toggle("Verbose", isOn: $activityVerbose)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .help("Show every event including debug checkpoints. The on-disk activity.log always captures everything.")
                     Spacer()
                     Button {
-                        openScriptRunsLog()
+                        openActivityLogs()
                     } label: {
                         Label("Open Logs", systemImage: "doc.text.magnifyingglass")
                     }
-                    .help("Open ~/Library/Logs/OBScene/script-runs.log in your default .log editor.")
+                    .help("Open ~/Library/Logs/OBScene/activity.log (and script-runs.log) in your default .log editor.")
                 }
 
-                if activityLog.events.isEmpty {
-                    Text("No activity yet. Connect a display or run a test action.")
+                if visibleEvents.isEmpty {
+                    Text(activityVerbose
+                         ? "No activity yet."
+                         : "No activity yet. Connect a display or run a test action.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .italic()
                         .padding(.vertical, 4)
                 } else {
-                    ForEach(activityLog.events.prefix(12)) { event in
+                    ForEach(visibleEvents.prefix(renderLimit)) { event in
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: event.kind.symbol)
                                 .foregroundColor(.accentColor)
@@ -969,18 +993,56 @@ struct SettingsView: View {
         }
     }
 
-    /// Open the script-runs log file in the user's default `.log` editor
-    /// (typically Console.app on a fresh macOS install). Creates the file
-    /// first if it doesn't exist yet — without this, NSWorkspace.open would
-    /// fall back to Finder showing the empty Logs/OBScene directory.
-    private func openScriptRunsLog() {
+    /// Open OBScene's debug log files in the user's default `.log` editor
+    /// (typically Console.app on a fresh macOS install). The new primary
+    /// destination is `activity.log` — the verbose feed of every Activity
+    /// event including the debug checkpoints filtered out of the Settings
+    /// tab. We ALSO open `script-runs.log` so the existing per-profile
+    /// shell-script audit trail is still one click away (the help text
+    /// promises both, and users have come to expect it from the previous
+    /// "Open Logs" button). Both files are created on demand so
+    /// NSWorkspace.open never falls back to Finder showing an empty
+    /// Logs/OBScene directory.
+    private func openActivityLogs() {
+        // Ensure both files exist on disk so NSWorkspace has something to
+        // hand to the user's editor. ActivityLog.shared writes its file
+        // lazily on first event; create an empty one here if no events have
+        // landed yet (e.g. fresh install).
         ScriptRunner.ensureLogFileExists()
-        let url = ScriptRunner.logFileURL
-        if !NSWorkspace.shared.open(url) {
-            // Fallback: reveal in Finder so the user can still see the file
-            // exists, even if no .log handler is registered (rare but
-            // possible if the user has unbound the extension).
-            NSWorkspace.shared.activateFileViewerSelecting([url])
+        ensureActivityLogFileExists()
+
+        let activityURL = ActivityLog.logFileURL
+        let scriptRunsURL = ScriptRunner.logFileURL
+
+        // Open both files. Most users will have a single .log handler
+        // registered (Console.app by default), and both opens will route to
+        // the same app — Console.app cleanly handles two files at once. If
+        // either open fails, fall back to revealing both in Finder so the
+        // user can still find them.
+        let activityOpened = NSWorkspace.shared.open(activityURL)
+        let scriptsOpened = NSWorkspace.shared.open(scriptRunsURL)
+
+        if !activityOpened || !scriptsOpened {
+            NSWorkspace.shared.activateFileViewerSelecting([
+                activityURL,
+                scriptRunsURL,
+            ])
+        }
+    }
+
+    /// Best-effort: ensure the Activity-log file exists on disk so the
+    /// "Open Logs" button works even on a freshly-launched OBScene that
+    /// hasn't logged anything yet. ActivityLog itself creates the file
+    /// lazily on first append; this is just the empty-file precondition
+    /// for the manual-open path. Errors are intentionally swallowed.
+    private func ensureActivityLogFileExists() {
+        let url = ActivityLog.logFileURL
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
         }
     }
 
