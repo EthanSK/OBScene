@@ -193,6 +193,64 @@ class OBSWebSocketManager: ObservableObject {
     /// access between the URLSession delegate queue and the main/timer queue.
     private let callbackLock = NSLock()
 
+    // MARK: Last-known Space sidecar (cold-launch restore)
+    //
+    // Periodic background timer that captures OBS's current Space (Mission
+    // Control workspace) every `lastSpaceCaptureInterval` seconds while the
+    // WebSocket is connected, and writes it to the on-disk sidecar managed
+    // by `SpaceManager`. Without this, a cold launch (OBS not running →
+    // OBScene auto-launches it) has no way to know which Space the user
+    // wants OBS on, because the warm-restart path's live capture only fires
+    // when OBS is already running.
+    //
+    // Lifetime: started on identified-handshake (handleIdentified), stopped
+    // on socket teardown / disconnect / scheduleReconnect. We start fresh
+    // every connect rather than letting the timer survive a disconnect so
+    // the timer can never outlive the underlying OBS session and write a
+    // stale (post-quit) sentinel.
+    //
+    // Gating: the user-visible `restoreSpaceOnRestart` toggle controls both
+    // the warm-restart capture and this periodic capture. When the user
+    // turns it off they get exactly the macOS-default behaviour (no Space
+    // tracking at all).
+
+    /// Interval for the periodic background capture. 30s mirrors the spec
+    /// — frequent enough that an unexpected OBS quit (crash, force-quit)
+    /// loses at most ~30s of Space drift, infrequent enough that the disk
+    /// + SkyLight churn is invisible.
+    private let lastSpaceCaptureInterval: TimeInterval = 30.0
+
+    /// Background capture timer. Lives on the main run loop in `.common`
+    /// modes so it ticks while menus are tracking. Always nil-guarded
+    /// because both setters (`startLastSpaceCaptureTimer` /
+    /// `stopLastSpaceCaptureTimer`) coexist with auto-reconnect bookkeeping
+    /// that may flip the connection state on background queues.
+    private var lastSpaceCaptureTimer: Timer?
+
+    /// Generation-counter for cold-launch restore intent. Bumped every
+    /// time `ensureConnected` fires `launchOBS` (i.e. starts a new
+    /// cold-launch attempt) AND every time the intent is invalidated
+    /// (terminal failure, user disconnect, external cancel of the
+    /// owning handle).
+    ///
+    /// `coldLaunchRestoreGeneration` holds the current "live" generation;
+    /// `coldLaunchRestorePendingGeneration` holds the generation that
+    /// produced the still-pending intent (or `nil` when no intent is
+    /// pending).
+    ///
+    /// The wrappedOnReady captures the generation under which the intent
+    /// was set and only applies the restore when the captured generation
+    /// still matches `coldLaunchRestorePendingGeneration`. This is what
+    /// makes the intent robust to coalesced ensureConnected calls AND to
+    /// external `handle.cancel()` from DisplayMonitor (which bumps the
+    /// generation, invalidating any in-flight intent without leaking
+    /// across to a future unrelated reconnect).
+    ///
+    /// Read/written only on the main queue (every entry point that touches
+    /// these dispatches to .main first), so no lock is needed.
+    private var coldLaunchRestoreGeneration: UInt64 = 0
+    private var coldLaunchRestorePendingGeneration: UInt64? = nil
+
     private init() {
         startCallbackCleanupTimer()
     }
@@ -200,6 +258,8 @@ class OBSWebSocketManager: ObservableObject {
     deinit {
         callbackCleanupTimer?.invalidate()
         callbackCleanupTimer = nil
+        lastSpaceCaptureTimer?.invalidate()
+        lastSpaceCaptureTimer = nil
         pendingReconnectWorkItem?.cancel()
         pendingReconnectWorkItem = nil
         webSocket?.cancel(with: .normalClosure, reason: nil)
@@ -261,6 +321,11 @@ class OBSWebSocketManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
             self?.publishState(.idle)
+            // Clear the cold-launch restore intent — a user-initiated
+            // disconnect (typically `applicationWillTerminate`) means we
+            // have no business applying a Space restore on whatever
+            // future connect happens.
+            self?.coldLaunchRestorePendingGeneration = nil
         }
     }
 
@@ -288,6 +353,11 @@ class OBSWebSocketManager: ObservableObject {
         session = nil
         oldTask?.cancel(with: .normalClosure, reason: nil)
         oldSession?.invalidateAndCancel()
+
+        // Stop the periodic Space-capture timer alongside the socket so it
+        // can never outlive the OBS session it was tracking. The next
+        // successful Identify will start a fresh timer.
+        stopLastSpaceCaptureTimer()
     }
 
     // MARK: - Message Handling
@@ -409,6 +479,12 @@ class OBSWebSocketManager: ObservableObject {
         fetchSceneCollections()
         fetchProfiles()
         fetchScenes()
+
+        // Start (or restart) the periodic Space-capture timer. Hops to
+        // main internally; idempotent across reconnect bounces. Gated by
+        // `restoreSpaceOnRestart` inside the helper so a user with the
+        // toggle off pays nothing.
+        startLastSpaceCaptureTimer()
     }
 
     private func handleRequestResponse(_ d: Any) {
@@ -469,6 +545,137 @@ class OBSWebSocketManager: ObservableObject {
 
         for (_, pending) in all {
             pending.callback(nil)
+        }
+    }
+
+    // MARK: - Last-known Space periodic capture
+
+    /// (Re)start the periodic background capture timer. Idempotent: tearing
+    /// down any previous timer first lets us call this from
+    /// `handleIdentified` on every successful Identify without leaking
+    /// timers across reconnect bounces.
+    ///
+    /// Thread contract: ALWAYS hops to the main queue. Timers added to
+    /// RunLoop.main must be created/scheduled on main, and the connection
+    /// pipeline can call us from the URLSession delegate queue
+    /// (handleIdentified is invoked from `handleMessage` which runs off
+    /// `task.receive`).
+    ///
+    /// First-tick deferral: the timer's first capture fires AFTER one full
+    /// interval, NOT immediately. This is deliberate — `handleIdentified`
+    /// runs before the cold-launch restore in
+    /// `applyColdLaunchSpaceRestoreIfNeeded`, and an immediate capture
+    /// would observe OBS's current (post-launch, pre-restore) Space and
+    /// overwrite the sidecar's saved target with that wrong value before
+    /// the restore could load it. Waiting one interval gives the cold-
+    /// launch restore time to land first; by the time the first periodic
+    /// capture runs, OBS is on the correct Space and the sidecar
+    /// reconciles to that value.
+    private func startLastSpaceCaptureTimer() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.stopLastSpaceCaptureTimer()
+            // Don't even create the timer if the user has the toggle off —
+            // saves both the disk churn and the SkyLight call. If the user
+            // flips the toggle back on later, the next reconnect's
+            // `handleIdentified` will start a fresh timer.
+            guard ConfigStore.shared.config.restoreSpaceOnRestart else {
+                ActivityLog.shared.log(.info,
+                    "Last-Space periodic capture timer not started: restoreSpaceOnRestart toggle is off")
+                return
+            }
+            // Schedule with `fire` set to now+interval so the first tick
+            // does NOT race the cold-launch restore. See doc comment above.
+            let interval = self.lastSpaceCaptureInterval
+            let timer = Timer(
+                fire: Date().addingTimeInterval(interval),
+                interval: interval,
+                repeats: true,
+                block: { [weak self] _ in
+                    self?.captureLastSpaceIfPossible()
+                }
+            )
+            self.lastSpaceCaptureTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture timer started (first tick in \(Int(interval))s, every \(Int(interval))s thereafter)")
+        }
+    }
+
+    /// Tear down the periodic capture timer. Safe to call from any queue —
+    /// hops to main internally so the Timer invalidation runs on the same
+    /// thread that scheduled it.
+    private func stopLastSpaceCaptureTimer() {
+        let work = { [weak self] in
+            guard let self = self else { return }
+            self.lastSpaceCaptureTimer?.invalidate()
+            self.lastSpaceCaptureTimer = nil
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// Single capture+persist cycle, gated on the runtime conditions that
+    /// must all hold for the value to be useful for cold-launch restore.
+    /// Never throws / never blocks the timer — every failure path logs at
+    /// file-only level and returns. The toggle check is INSIDE the closure
+    /// (not just at start time) so flipping the user setting off mid-flight
+    /// stops the writes within one tick.
+    private func captureLastSpaceIfPossible() {
+        // Re-check the toggle at every tick. The timer can outlive a brief
+        // toggle-off / toggle-on cycle if a reconnect-driven restart
+        // happens to land in the same tick window; cheaper to check than
+        // to plumb a settings observer.
+        guard ConfigStore.shared.config.restoreSpaceOnRestart else {
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture skipped: restoreSpaceOnRestart toggle is off")
+            return
+        }
+        guard self.isConnected else {
+            // Handler ordering: the timer can in theory race with
+            // `tearDownSocket` flipping isConnected to false. Treat that
+            // as a no-op tick — the next reconnect's
+            // `startLastSpaceCaptureTimer` will replace this stale timer.
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture skipped: WebSocket not connected")
+            return
+        }
+        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+        }) else {
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture skipped: no running OBS process")
+            return
+        }
+        let pid = runningApp.processIdentifier
+        let bundlePath = runningApp.bundleURL?.path
+        // SpaceManager handles the three observable outcomes:
+        //   - .persisted(id):           single-Space, sidecar written.
+        //   - .clearedDueToMultiSpace:  window is sticky / All Desktops;
+        //                               sidecar wiped so a future cold
+        //                               launch doesn't collapse the
+        //                               intentionally-multi-Space window
+        //                               back to a stale single Space.
+        //   - .unobservable:            SkyLight gone, no OBS window, or
+        //                               empty membership list. Sidecar
+        //                               left intact (the prior value is
+        //                               still our best guess).
+        switch SpaceManager.captureAndPersistSpace(
+            forOBSPID: pid,
+            obsBundlePath: bundlePath
+        ) {
+        case .persisted(let spaceID):
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture wrote Space \(spaceID) (pid \(pid))")
+        case .clearedDueToMultiSpace:
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture cleared sidecar — OBS window is on multiple Spaces (pid \(pid))")
+        case .unobservable:
+            ActivityLog.shared.log(.info,
+                "Last-Space periodic capture observed nothing actionable (pid \(pid))")
         }
     }
 
@@ -1027,19 +1234,39 @@ class OBSWebSocketManager: ObservableObject {
         }
 
         let running = isOBSRunning()
+        // Capture the OBS bundle URL up front so the cold-launch restore
+        // decision below has access to a stable path (NSWorkspace's lookup
+        // is cheap but resolving on the .connected callback would race the
+        // user moving OBS mid-launch — unlikely but cheap to avoid).
+        let obsBundleURL = obsApplicationURL()
 
         if !running {
             guard autoLaunch else {
                 DispatchQueue.main.async { onReady(.autoLaunchDisabled) }
                 return handle
             }
-            guard obsApplicationURL() != nil else {
+            guard obsBundleURL != nil else {
                 DispatchQueue.main.async { onReady(.obsNotInstalled) }
                 return handle
             }
             print("[OBScene] OBS not running — launching…")
             ActivityLog.shared.log(.info, "OBS not running — launching")
             _ = launchOBS()
+            // Mark cold-launch state on the manager so a coalesced
+            // follow-up `ensureConnected` (e.g. trigger pre-warm fires,
+            // then real trigger fires while OBS is still booting) still
+            // routes through the cold-launch restore. The follow-up call
+            // observes `isOBSRunning() == true` (we just launched it) and
+            // would otherwise skip the restore entirely. Bumping the
+            // generation invalidates any prior pending intent (we're
+            // starting a new launch, the old one is no longer relevant)
+            // and makes this the new live generation. Set on .main so
+            // we're co-resident with all other readers/writers.
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.coldLaunchRestoreGeneration &+= 1
+                self.coldLaunchRestorePendingGeneration = self.coldLaunchRestoreGeneration
+            }
         } else {
             print("[OBScene] OBS running but not connected — attempting to reconnect")
             ActivityLog.shared.log(.info, "OBS running — reconnecting WebSocket")
@@ -1047,6 +1274,77 @@ class OBSWebSocketManager: ObservableObject {
 
         // Kick off (or restart) the connection attempt.
         connect(host: host, port: port, password: password)
+
+        // Cold-launch capture: apply the sidecar-backed Space restore on
+        // the .connected path when EITHER:
+        //   (a) this `ensureConnected` itself initiated a cold launch
+        //       (`!running`), OR
+        //   (b) a previous `ensureConnected` already initiated a cold
+        //       launch and is still pending — the manager-level
+        //       `coldLaunchRestorePending` flag preserves the intent
+        //       across coalesced calls.
+        // Both are gated on the user-visible `restoreSpaceOnRestart`
+        // toggle. The sidecar's freshness/bundle/age checks are handled
+        // inside `applyColdLaunchSpaceRestoreIfNeeded` (which delegates
+        // to `SpaceManager.loadLastSpace`) so the gate here only filters
+        // "is this a cold launch context at all?", not "should we
+        // actually move the window?".
+        let wrappedOnReady: (EnsureConnectedResult) -> Void = { [weak self] result in
+            guard let self = self else {
+                onReady(result)
+                return
+            }
+            // Hop to .main for cold-launch generation access
+            // (single-threaded ownership invariant).
+            DispatchQueue.main.async {
+                // Generation rules:
+                //   - .connected: read the pending generation; if non-nil
+                //     and the toggle is on, apply the restore. Always
+                //     clear the pending generation on .connected so a
+                //     re-entrant ensureConnected can't double-fire.
+                //   - .cancelled: this callback may belong to a
+                //     coalesced predecessor whose replacement is still
+                //     going to fire .connected against the same
+                //     pending generation. Don't touch the generation
+                //     here — let the .connected path consume it. If the
+                //     cancellation was external (DisplayMonitor) and no
+                //     replacement is on the way, the pending generation
+                //     drifts harmlessly until either (a) a new
+                //     `ensureConnected` cold-launch bumps the generation
+                //     (invalidating this stale intent), or (b)
+                //     `disconnect()` clears it directly.
+                //   - .autoLaunchDisabled / .obsNotInstalled /
+                //     .websocketUnavailable: terminal failures —
+                //     invalidate the pending intent (no replacement is
+                //     going to satisfy it).
+                switch result {
+                case .connected:
+                    let toggleOn = ConfigStore.shared.config.restoreSpaceOnRestart
+                    let pendingGen = self.coldLaunchRestorePendingGeneration
+                    let wantsRestore = (pendingGen != nil) && toggleOn
+                    // Consume the pending generation regardless of
+                    // whether we apply or skip — the intent is resolved
+                    // by this .connected.
+                    self.coldLaunchRestorePendingGeneration = nil
+                    guard wantsRestore else {
+                        onReady(.connected)
+                        return
+                    }
+                    self.applyColdLaunchSpaceRestoreIfNeeded(
+                        expectedBundlePath: obsBundleURL?.path,
+                        profileName: "auto-launch",
+                        completion: {
+                            onReady(.connected)
+                        }
+                    )
+                case .cancelled:
+                    onReady(result)
+                case .autoLaunchDisabled, .obsNotInstalled, .websocketUnavailable:
+                    self.coldLaunchRestorePendingGeneration = nil
+                    onReady(result)
+                }
+            }
+        }
 
         pollForConnection(
             handle: handle,
@@ -1056,10 +1354,73 @@ class OBSWebSocketManager: ObservableObject {
             deadline: Date().addingTimeInterval(TimeInterval(max(timeoutSeconds, 1))),
             reconnectEvery: 3.0,
             lastReconnectAt: Date(),
-            onReady: onReady
+            onReady: wrappedOnReady
         )
 
         return handle
+    }
+
+    /// Cold-launch helper: read the persisted last-Space sidecar and, if it
+    /// applies, route through `SpaceManager.restoreOBSWindow` so the same
+    /// "wait for window → move → log outcome" plumbing as the warm-restart
+    /// path takes care of the actual move. Logs every decision point at
+    /// file-only level + a single user-visible line on the apply path so
+    /// the Activity tab shows that the restore happened (paired with
+    /// Ethan's "I want to see why OBS landed where it did" debugging
+    /// requirement).
+    ///
+    /// `completion` always fires on the main queue exactly once. Callers
+    /// gate their downstream pipeline on it so a follow-up trigger can't
+    /// race a still-pending Space move.
+    private func applyColdLaunchSpaceRestoreIfNeeded(
+        expectedBundlePath: String?,
+        profileName: String,
+        completion: @escaping () -> Void
+    ) {
+        // Resolve the freshly-launched OBS process. If it's gone (user
+        // immediately killed it during the brief window between Identify
+        // and this callback), there's nothing to restore — log + complete.
+        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
+        }) else {
+            ActivityLog.shared.log(.info,
+                "Cold-launch Space restore: OBS no longer running at WebSocket-ready — skipping (\(profileName))")
+            completion()
+            return
+        }
+
+        switch SpaceManager.loadLastSpace(expectedBundlePath: expectedBundlePath) {
+        case .missing:
+            ActivityLog.shared.log(.info,
+                "Cold-launch Space restore: no sidecar present — leaving OBS on current Space (\(profileName))")
+            completion()
+        case .corrupt(let reason):
+            ActivityLog.shared.log(.info,
+                "Cold-launch Space restore: sidecar corrupt (\(reason)) — leaving OBS on current Space (\(profileName))")
+            completion()
+        case .stale(let ageSeconds):
+            ActivityLog.shared.log(.info,
+                "Cold-launch Space restore: sidecar stale (age \(Int(ageSeconds))s, max \(Int(SpaceManager.lastSpaceMaxAge))s) — leaving OBS on current Space (\(profileName))")
+            completion()
+        case .bundleMismatch(let recorded):
+            ActivityLog.shared.log(.info,
+                "Cold-launch Space restore: bundle path mismatch (recorded \(recorded ?? "nil"), expected \(expectedBundlePath ?? "nil")) — leaving OBS on current Space (\(profileName))")
+            completion()
+        case .ok(let spaceID):
+            // User-visible on the apply path so the Activity tab shows
+            // "yes, this is why OBS just teleported to a different Space".
+            ActivityLog.shared.log(.info,
+                "Restoring OBS to last-known Space \(spaceID) (\(profileName))",
+                userVisible: true)
+            SpaceManager.restoreOBSWindow(
+                pid: runningApp.processIdentifier,
+                toSpace: spaceID,
+                profileName: profileName,
+                windowWaitTimeout: 5.0
+            ) {
+                completion()
+            }
+        }
     }
 
     /// Poll the `isConnected` flag every 500ms until the deadline. We also
@@ -1135,11 +1496,26 @@ class OBSWebSocketManager: ObservableObject {
     /// Cancel any in-flight ensure-connected attempt. Called when the user
     /// unplugs mid-wait so we don't keep polling for a trigger that's been
     /// cancelled.
+    ///
+    /// External cancellation also invalidates any pending cold-launch
+    /// restore intent: the user cancelled the trigger that initiated the
+    /// cold launch, so a future unrelated reconnect must NOT consume the
+    /// stale generation and apply the sidecar to a window the user is
+    /// already happy with. We bump the generation rather than just
+    /// clearing the pending one — this protects against a race where the
+    /// `.cancelled` callback for the now-cancelled handle has not yet run
+    /// (and thus has not had a chance to clear the pending state via the
+    /// switch in `wrappedOnReady`).
     func cancelInflightEnsureConnected() {
         ensureLock.lock()
         inflightEnsureHandle?.cancelled = true
         inflightEnsureHandle = nil
         ensureLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.coldLaunchRestoreGeneration &+= 1
+            self.coldLaunchRestorePendingGeneration = nil
+        }
     }
 
     // MARK: - Live-session status (used by restart-OBS pre-flight)
@@ -1845,12 +2221,28 @@ enum OBSAppController {
         // continue with the rest of the restart. Gated on the user-visible
         // toggle so power users can disable.
         let restoreSpace = ConfigStore.shared.config.restoreSpaceOnRestart
-        let capturedSpaceID: UInt64? = restoreSpace ? SpaceManager.spaceForOBSWindow(pid: pid) : nil
+        // Run the live pre-terminate capture through the same
+        // capture+reconcile API as the periodic timer. Two reasons:
+        //   1. The persist path is identical, so the sidecar always sees
+        //      the freshest live capture exactly when we know the user's
+        //      intent (just before OBS exits).
+        //   2. The .clearedDueToMultiSpace branch ALSO fires here — if
+        //      OBS is on All Desktops at warm-restart time, any stale
+        //      single-Space sidecar from before the user pinned multiple
+        //      Spaces is wiped, so a future cold launch doesn't collapse
+        //      the (now intentionally multi-Space) window back onto the
+        //      stale value.
+        var capturedSpaceID: UInt64? = nil
         if restoreSpace {
-            if let spaceID = capturedSpaceID {
+            switch SpaceManager.captureAndPersistSpace(forOBSPID: pid, obsBundlePath: obsAppURL.path) {
+            case .persisted(let spaceID):
+                capturedSpaceID = spaceID
                 ActivityLog.shared.log(.info,
                     "Captured OBS Space ID \(spaceID) before terminate (\(profileName))")
-            } else {
+            case .clearedDueToMultiSpace:
+                ActivityLog.shared.log(.info,
+                    "OBS window is on multiple Spaces before terminate — sidecar cleared, no Space restore on this restart (\(profileName))")
+            case .unobservable:
                 ActivityLog.shared.log(.info,
                     "OBS Space capture skipped (SkyLight unavailable, OBS window missing, or empty space list) (\(profileName))")
             }

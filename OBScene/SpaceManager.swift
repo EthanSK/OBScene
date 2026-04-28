@@ -596,4 +596,305 @@ enum SpaceManager {
         ActivityLog.shared.log(.info,
             "SkyLight private API unavailable — Space restore on OBS restart will be skipped")
     }
+
+    // MARK: - Persisted last-known Space (sidecar)
+    //
+    // Warm restart can capture the Space ID live (OBS is running, the window
+    // exists, SkyLight returns its membership). Cold launch can't — by the
+    // time OBScene auto-launches OBS the window is gone and there is nothing
+    // to query. To restore OBS to its prior Space on a cold launch we
+    // therefore persist the last-known Space ID to a small JSON sidecar
+    // ALONGSIDE the existing live capture, and read it back on cold launch.
+    //
+    // Storage: `~/Library/Application Support/OBScene/last-obs-space.json`.
+    // Chose a sidecar over UserDefaults because:
+    //   - The value is operational/runtime metadata, not user preference.
+    //     UserDefaults is `OBSceneConfig` (the user's settings); mixing
+    //     mutable runtime state in there would muddy the schema.
+    //   - On-disk JSON is trivially debuggable from a terminal.
+    //   - A future migration / wipe is `rm` instead of an NSUserDefaults
+    //     surgery.
+    //
+    // Schema is intentionally minimal so future fields can be added without
+    // breaking older OBScene builds (decoder ignores unknown keys; missing
+    // keys fall back to defaults).
+
+    /// Bundle that produced the captured Space ID. Persisted so that if the
+    /// user moves OBS between volumes (or installs a fresh copy at a
+    /// different path) we can invalidate the stale Space ID instead of
+    /// reapplying it to a window that was never there.
+    private struct LastSpaceRecord: Codable {
+        let spaceID: UInt64
+        let capturedAt: Date
+        let obsBundlePath: String?
+
+        enum CodingKeys: String, CodingKey {
+            case spaceID
+            case capturedAt
+            case obsBundlePath
+        }
+
+        init(spaceID: UInt64, capturedAt: Date, obsBundlePath: String?) {
+            self.spaceID = spaceID
+            self.capturedAt = capturedAt
+            self.obsBundlePath = obsBundlePath
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            spaceID = try container.decode(UInt64.self, forKey: .spaceID)
+            capturedAt = try container.decode(Date.self, forKey: .capturedAt)
+            obsBundlePath = try container.decodeIfPresent(String.self, forKey: .obsBundlePath)
+        }
+    }
+
+    /// Maximum age beyond which a persisted Space ID is treated as stale and
+    /// ignored. Same rationale as the live-capture skip on multi-Space
+    /// windows: if the value is old enough the user probably reorganised
+    /// their Spaces and silently moving OBS would be the wrong call.
+    static let lastSpaceMaxAge: TimeInterval = 7 * 24 * 60 * 60  // 7 days
+
+    /// On-disk location of the sidecar. Lives next to OBScene's other
+    /// Application Support files (which today is empty — OBScene's main
+    /// config is in UserDefaults — but using Application Support keeps it
+    /// out of preferences and easy to inspect/wipe).
+    static var lastSpaceFileURL: URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        return appSupport
+            .appendingPathComponent("OBScene", isDirectory: true)
+            .appendingPathComponent("last-obs-space.json", isDirectory: false)
+    }
+
+    private static let sidecarISOFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Encoder/decoder configured to emit the `capturedAt` field as an ISO
+    /// 8601 string with fractional seconds. Plain Date defaults to a numeric
+    /// reference-date which is harder to eyeball.
+    private static let sidecarEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(sidecarISOFormatter.string(from: date))
+        }
+        return e
+    }()
+
+    private static let sidecarDecoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            if let date = sidecarISOFormatter.date(from: raw) {
+                return date
+            }
+            // Fallback: tolerate a numeric reference-date in case a future
+            // build is written with the default strategy.
+            if let asDouble = Double(raw) {
+                return Date(timeIntervalSinceReferenceDate: asDouble)
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unparseable date \(raw)"
+            )
+        }
+        return d
+    }()
+
+    /// Delete the persisted sidecar. Used when the OBS window transitions
+    /// to "All Desktops" / sticky / multi-Space membership: the previously
+    /// captured single-Space ID is no longer the user's intent, and a
+    /// future cold launch should NOT collapse the (now intentionally
+    /// multi-Space) window onto the stale value. Best-effort: a missing
+    /// file is treated as success and an unrelated FS error is logged but
+    /// swallowed.
+    static func clearLastSpace(reason: String) {
+        let url = lastSpaceFileURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            // Nothing to clear; silently no-op.
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+            ActivityLog.shared.log(.info,
+                "Cleared last-Space sidecar (reason: \(reason))")
+        } catch {
+            ActivityLog.shared.log(.info,
+                "Last-Space sidecar clear failed: \(error.localizedDescription) (reason: \(reason))")
+        }
+    }
+
+    /// Persist `spaceID` to the sidecar so a future cold launch can restore
+    /// OBS to that Space. `obsBundlePath` records which OBS install produced
+    /// the value — used to invalidate the persisted record when the user
+    /// later launches a different OBS bundle. Best-effort: errors are logged
+    /// at file-only level and swallowed (this is debug telemetry, not a
+    /// correctness path).
+    static func persistLastSpace(_ spaceID: UInt64, obsBundlePath: String?) {
+        guard spaceID != 0 else {
+            ActivityLog.shared.log(.info,
+                "Skipping last-Space sidecar write: Space ID is 0")
+            return
+        }
+        let record = LastSpaceRecord(
+            spaceID: spaceID,
+            capturedAt: Date(),
+            obsBundlePath: obsBundlePath
+        )
+        let url = lastSpaceFileURL
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try sidecarEncoder.encode(record)
+            try data.write(to: url, options: .atomic)
+            ActivityLog.shared.log(.info,
+                "Persisted last OBS Space \(spaceID) to sidecar (bundle: \(obsBundlePath ?? "nil"))")
+        } catch {
+            ActivityLog.shared.log(.info,
+                "Last-Space sidecar write failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Outcome of a sidecar load — exposed so callers can surface a
+    /// user-visible activity-log line that explains *why* a cold-launch
+    /// restore was applied vs. skipped. Avoids duplicating the decision
+    /// logic inside the caller.
+    enum LastSpaceLoadResult {
+        /// Sidecar present, fresh, and bundle path matched (if expected).
+        /// Carries the Space ID to apply.
+        case ok(UInt64)
+        /// No sidecar file on disk — first run, or it was deleted.
+        case missing
+        /// File present but corrupt / failed to decode.
+        case corrupt(String)
+        /// Sidecar present but older than `lastSpaceMaxAge`. Carries the
+        /// recorded age in seconds so callers can include it in the log.
+        case stale(ageSeconds: TimeInterval)
+        /// Sidecar present but the recorded `obsBundlePath` doesn't match
+        /// `expectedBundlePath`. Carries the recorded path for debug
+        /// visibility.
+        case bundleMismatch(recorded: String?)
+    }
+
+    /// Read + validate the persisted Space ID. Returns `.ok(id)` only when
+    /// the sidecar exists, decodes cleanly, is within `lastSpaceMaxAge`, and
+    /// (if `expectedBundlePath` is non-nil) the recorded bundle path
+    /// matches. All other outcomes return a typed reason so callers can log
+    /// the specific decision point.
+    ///
+    /// `expectedBundlePath` should be the absolute path of the OBS bundle
+    /// OBScene is currently launching (resolved via NSWorkspace) — passing
+    /// `nil` skips the bundle-mismatch check and is mostly useful in tests
+    /// or when the bundle URL isn't resolvable.
+    static func loadLastSpace(expectedBundlePath: String?) -> LastSpaceLoadResult {
+        let url = lastSpaceFileURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return .missing
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return .corrupt("read failed: \(error.localizedDescription)")
+        }
+        let record: LastSpaceRecord
+        do {
+            record = try sidecarDecoder.decode(LastSpaceRecord.self, from: data)
+        } catch {
+            return .corrupt("decode failed: \(error.localizedDescription)")
+        }
+
+        let age = Date().timeIntervalSince(record.capturedAt)
+        if age > lastSpaceMaxAge {
+            return .stale(ageSeconds: age)
+        }
+        if age < 0 {
+            // Captured-at is in the future — system clock changed, treat as
+            // stale rather than trust the value.
+            return .stale(ageSeconds: age)
+        }
+
+        if let expected = expectedBundlePath,
+           let recorded = record.obsBundlePath,
+           expected != recorded {
+            return .bundleMismatch(recorded: recorded)
+        }
+
+        guard record.spaceID != 0 else {
+            return .corrupt("recorded spaceID is 0")
+        }
+        return .ok(record.spaceID)
+    }
+
+    /// Outcome of a periodic capture+persist tick. Distinguishes the
+    /// "single Space, persisted" success from the multi-Space case (where
+    /// any previously persisted record is now wrong and must be cleared)
+    /// from the various unobservable cases (no window, SkyLight gone)
+    /// where we leave the sidecar alone.
+    enum CaptureOutcome {
+        /// Single-Space membership detected; sidecar updated.
+        case persisted(UInt64)
+        /// Window is sticky / All-Desktops; the existing sidecar (if any)
+        /// has been cleared so a future cold launch doesn't collapse the
+        /// intentionally-multi-Space window onto the stale single ID.
+        case clearedDueToMultiSpace
+        /// SkyLight unavailable, OBS window missing, or empty membership
+        /// list. Sidecar (if any) is left untouched — the previously
+        /// captured value is still our best guess for cold-launch restore
+        /// and there's no positive signal to invalidate it.
+        case unobservable
+    }
+
+    /// Capture the OBS window's current Space and reconcile the sidecar.
+    /// Used by the periodic background timer + the warm-restart pre-flight,
+    /// so both paths share identical capture/invalidation semantics:
+    ///   - single-Space membership → persist Space ID;
+    ///   - multi-Space (sticky / All Desktops) → clear sidecar (the user
+    ///     intentionally pinned to multiple Spaces, restoring to any one
+    ///     would be wrong);
+    ///   - SkyLight unavailable / no window / empty list → no-op (we have
+    ///     no positive signal either way; preserve any prior persisted
+    ///     value as the best available guess).
+    ///
+    /// `obsBundlePath` is recorded into the sidecar on the persist path so
+    /// a future load can invalidate the value if OBS moves between bundles.
+    @discardableResult
+    static func captureAndPersistSpace(forOBSPID pid: pid_t,
+                                       obsBundlePath: String?) -> CaptureOutcome {
+        guard let connection = currentConnection() else {
+            logUnavailableOnce()
+            return .unobservable
+        }
+        guard let wid = mainWindowID(forPID: pid, includeOffscreen: true) else {
+            return .unobservable
+        }
+        guard let rawMemberships = spacesForWindow(wid, connection: connection) else {
+            return .unobservable
+        }
+        let memberships = normalizedSpaces(rawMemberships)
+        if memberships.count == 1 {
+            let spaceID = memberships[0]
+            persistLastSpace(spaceID, obsBundlePath: obsBundlePath)
+            return .persisted(spaceID)
+        }
+        if memberships.count > 1 {
+            // Window is now on multiple Spaces (sticky / "All Desktops").
+            // Any previously persisted single-Space ID is no longer correct
+            // — clear it so a future cold launch doesn't collapse the
+            // window back onto a single Space.
+            clearLastSpace(reason: "OBS window is on \(memberships.count) Spaces (sticky / all-desktops)")
+            return .clearedDueToMultiSpace
+        }
+        // memberships.count == 0 — same unobservable bucket.
+        return .unobservable
+    }
 }
