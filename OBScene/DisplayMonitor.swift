@@ -272,11 +272,16 @@ class DisplayMonitor {
 
     /// Run the full trigger path for a specific profile. Used by the Settings
     /// "Simulate Trigger" button so the user can dry-run their configuration
-    /// without replugging.
+    /// without replugging. Bypasses the `isEnabled` gate (the user explicitly
+    /// asked to simulate this profile) and passes `isSimulated: true` down
+    /// the pipeline so the OBS-restart-before-run failure paths still run the
+    /// activate script — a Simulate click should "do everything", even if a
+    /// step like the OBS restart can't complete (OBS not installed, terminate
+    /// AE blocked, websocket-ready timeout, etc.).
     func runTestTrigger(for profile: TriggerProfile) {
         cancelPendingTrigger(for: profile.id)
         ActivityLog.shared.log(.info, "Test trigger requested (\(profile.name))")
-        executeTrigger(for: profile.id)
+        executeTrigger(for: profile.id, isSimulated: true)
     }
 
     /// Legacy test trigger for backward compat — fires the first enabled profile.
@@ -289,14 +294,20 @@ class DisplayMonitor {
         }
     }
 
-    func executeTrigger(for profileId: UUID) {
+    func executeTrigger(for profileId: UUID, isSimulated: Bool = false) {
         triggerWorkItems.removeValue(forKey: profileId)
 
         // Look up the profile from the current config (it may have been edited
-        // since the trigger was scheduled).
-        guard let profile = ConfigStore.shared.config.profiles.first(where: { $0.id == profileId }),
-              profile.isEnabled else {
-            print("[OBScene] Trigger fired but profile not found or disabled")
+        // since the trigger was scheduled). For simulated triggers we
+        // intentionally skip the `isEnabled` check — Simulate Trigger is a
+        // dry-run aid, and silently dropping it because the user toggled the
+        // profile off while configuring would defeat the point.
+        guard let profile = ConfigStore.shared.config.profiles.first(where: { $0.id == profileId }) else {
+            print("[OBScene] Trigger fired but profile not found")
+            return
+        }
+        if !isSimulated && !profile.isEnabled {
+            print("[OBScene] Trigger fired but profile is disabled")
             return
         }
 
@@ -323,7 +334,7 @@ class DisplayMonitor {
         // the original synchronous behaviour.
         if hasScript && profile.restartOBSBeforeRun {
             ActivityLog.shared.log(.info, "Restart-before-run requested (\(profile.name))")
-            OBSAppController.restartOBS(profileName: profile.name) { [weak self] in
+            OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
                 guard let self = self else { return }
                 ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
                 ScriptRunner.run(script: profile.runScript, profileName: profile.name)

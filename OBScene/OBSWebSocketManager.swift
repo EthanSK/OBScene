@@ -1331,7 +1331,19 @@ enum OBSAppController {
     /// auditability. `beforeRun` is the closure that actually invokes the
     /// user's script (via ScriptRunner) — we call it after the restart
     /// settles, OR immediately when we skip / throttle.
-    static func restartOBS(profileName: String, beforeRun: @escaping () -> Void) {
+    ///
+    /// `isSimulated` is true when the trigger came from the Settings
+    /// "Simulate Trigger" button. In that case we ALWAYS invoke `beforeRun()`
+    /// even on the abort paths inside `performRestart` (terminate timeout,
+    /// relaunch error, websocket-ready timeout) — the user clicked Simulate
+    /// expecting the activate-script to fire, and silently dropping it
+    /// because OBS misbehaved makes the dry-run useless. For real
+    /// (USB / display) triggers we keep the original abort-on-failure
+    /// semantics so a flaky restart doesn't kick off a script when the
+    /// surrounding OBS pipeline is going to fail anyway.
+    static func restartOBS(profileName: String,
+                           isSimulated: Bool = false,
+                           beforeRun: @escaping () -> Void) {
         DispatchQueue.main.async {
             // Throttle: a recent or in-flight restart short-circuits.
             if Self.restartInFlight {
@@ -1397,6 +1409,7 @@ enum OBSAppController {
                     DispatchQueue.main.async {
                         Self.performRestart(
                             profileName: profileName,
+                            isSimulated: isSimulated,
                             beforeRun: beforeRun
                         )
                     }
@@ -1479,8 +1492,12 @@ enum OBSAppController {
     }
 
     /// Step 3 onwards: terminate, wait, relaunch, wait for websocket, settle,
-    /// then call `beforeRun()`.
+    /// then call `beforeRun()`. When `isSimulated` is true we also call
+    /// `beforeRun()` from every abort path so the user's activate script
+    /// always runs from a Simulate Trigger click — see `restartOBS` doc for
+    /// the rationale.
     private static func performRestart(profileName: String,
+                                       isSimulated: Bool,
                                        beforeRun: @escaping () -> Void) {
         let obs = OBSWebSocketManager.shared
 
@@ -1500,6 +1517,10 @@ enum OBSAppController {
             ActivityLog.shared.log(.info,
                 "OBS app bundle not resolvable — aborting restart (\(profileName))")
             Self.restartInFlight = false
+            // We never quit OBS here — we just couldn't resolve the bundle URL
+            // for the relaunch step. Run the script anyway (for real and
+            // simulated triggers) since the OBS app is still in whatever
+            // state it was before this attempt.
             beforeRun()
             return
         }
@@ -1535,6 +1556,10 @@ enum OBSAppController {
             )
             Self.restartInFlight = false
             restoreWebSocketAfterAbort()
+            // terminate() returned false BEFORE we did anything destructive —
+            // OBS is still up in its original state. Run the script (matches
+            // pre-isSimulated behaviour for real triggers; the dry-run path
+            // also wants the script regardless).
             beforeRun()
             return
         }
@@ -1574,10 +1599,13 @@ enum OBSAppController {
                     let elapsed = Date().timeIntervalSince(quitStartedAt)
                     ActivityLog.shared.log(.info,
                         "OBS did not exit within \(Int(Self.terminateTimeoutSeconds))s (elapsed \(String(format: "%.1f", elapsed))s) — aborting restart (\(profileName))")
-                    // Don't run the script here: we said in the design that
-                    // if the restart fails, we abort the whole flow.
                     Self.restartInFlight = false
                     restoreWebSocketAfterAbort()
+                    // Real triggers abort the whole flow on a failed restart
+                    // (matching the original design); Simulate Trigger still
+                    // runs the activate script so the user's dry-run shows
+                    // every side effect they configured. See `restartOBS`.
+                    if isSimulated { beforeRun() }
                     return
                 }
                 let elapsed = Date().timeIntervalSince(quitStartedAt)
@@ -1596,6 +1624,9 @@ enum OBSAppController {
                                 "OBS relaunch failed: \(error.localizedDescription) (\(profileName))")
                             Self.restartInFlight = false
                             restoreWebSocketAfterAbort()
+                            // Simulate Trigger still runs the script even
+                            // when relaunch fails — see `restartOBS` doc.
+                            if isSimulated { beforeRun() }
                             return
                         }
                         if let app = runningApp {
@@ -1623,6 +1654,10 @@ enum OBSAppController {
                                     ActivityLog.shared.log(.info,
                                         "OBS websocket did not come up within \(Int(Self.websocketReadyTimeoutSeconds))s — aborting (\(profileName))")
                                     Self.restartInFlight = false
+                                    // Simulate Trigger still runs the script
+                                    // even when the websocket never came back
+                                    // — see `restartOBS` doc.
+                                    if isSimulated { beforeRun() }
                                     return
                                 }
                                 ActivityLog.shared.log(.info,
