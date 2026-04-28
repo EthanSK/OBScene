@@ -149,6 +149,10 @@ enum SafeModeDismissalLogic {
         if l.contains("run normally") { return true }
         if l.contains("start normally") { return true }
         if l.contains("continue normally") { return true }
+        // OBS 32.x dialog uses "Run in Normal Mode" / "Launch in Normal Mode".
+        // Match any "X in normal mode" phrasing, but explicitly exclude any
+        // label containing "safe" so we never click "Run in Safe Mode".
+        if l.contains("normal mode") && !l.contains("safe") { return true }
         if l == "continue" { return true } // some OBS builds use a plain "Continue" primary button
         return false
     }
