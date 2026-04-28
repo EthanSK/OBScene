@@ -94,6 +94,8 @@ class USBMonitor {
     private var volumeLabelsResolvedKeys: Set<String> = []
 
     private var notifyPort: IONotificationPortRef?
+    private var notificationRunLoopSource: CFRunLoopSource?
+    private var notificationRunLoop: CFRunLoop?
     private var addedIterator: io_iterator_t = 0
     private var removedIterator: io_iterator_t = 0
     private var isMonitoring = false
@@ -133,14 +135,19 @@ class USBMonitor {
         notifyPort = IONotificationPortCreate(kIOMainPortDefault)
         guard let notifyPort = notifyPort else {
             print("[OBScene] Failed to create IONotificationPort")
+            isMonitoring = false
             return
         }
 
         let runLoopSource = IONotificationPortGetRunLoopSource(notifyPort).takeUnretainedValue()
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+        let runLoop = CFRunLoopGetMain()
+        CFRunLoopAddSource(runLoop, runLoopSource, .commonModes)
+        notificationRunLoopSource = runLoopSource
+        notificationRunLoop = runLoop
 
         guard let matchingDict = IOServiceMatching(kIOUSBDeviceClassName) else {
             print("[OBScene] Failed to create USB matching dictionary")
+            stopMonitoring()
             return
         }
 
@@ -168,6 +175,7 @@ class USBMonitor {
         // Re-create the matching dict for removal (IOKit consumes it).
         guard let removalMatchingDict = IOServiceMatching(kIOUSBDeviceClassName) else {
             print("[OBScene] Failed to create USB removal matching dictionary")
+            stopMonitoring()
             return
         }
 
@@ -192,6 +200,11 @@ class USBMonitor {
         guard isMonitoring else { return }
         isMonitoring = false
 
+        if let source = notificationRunLoopSource {
+            CFRunLoopRemoveSource(notificationRunLoop ?? CFRunLoopGetMain(), source, .commonModes)
+            notificationRunLoopSource = nil
+            notificationRunLoop = nil
+        }
         if addedIterator != 0 {
             IOObjectRelease(addedIterator)
             addedIterator = 0

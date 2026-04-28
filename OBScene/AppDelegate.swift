@@ -31,6 +31,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var usbFiredPlugInProfiles: [String: Set<UUID>] = [:]
     private var usbFiredPlugOutCancellations: [String: Set<UUID>] = [:]
 
+    /// Long-lived App Nap suppression token for this LSUIElement menu-bar app.
+    /// The selected activity option keeps this process responsive without
+    /// preventing normal idle system sleep.
+    private var appNapActivityToken: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // If OBSCENE_RENDER_SETTINGS=<path> is set, render the SettingsView
         // to a PNG offscreen and exit. Used by the release screenshot script
@@ -49,6 +54,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             renderMenuBarDropdownToPNG(path: outputPath)
             exit(0)
         }
+
+        beginAppNapSuppression()
 
         setupMenuBar()
         UserNotifier.requestPermission()
@@ -145,6 +152,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             center.removeObserver(token)
         }
         notificationObservers.removeAll()
+        endAppNapSuppression()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -157,6 +165,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             center.removeObserver(token)
         }
         notificationObservers.removeAll()
+
+        endAppNapSuppression()
+    }
+
+    private func beginAppNapSuppression() {
+        guard appNapActivityToken == nil else { return }
+        appNapActivityToken = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "OBScene must respond to USB and display events while running as a menu-bar app"
+        )
+    }
+
+    private func endAppNapSuppression() {
+        guard let token = appNapActivityToken else { return }
+        ProcessInfo.processInfo.endActivity(token)
+        appNapActivityToken = nil
     }
 
     // MARK: - USB Device Handling
