@@ -32,6 +32,16 @@
 // WebSocket reports ready) we poll for OBS's new windows and call
 // `moveWindow(_:toSpace:)` so the user lands back on the Space they were
 // on before the restart kicked them around.
+//
+// **macOS 14.5+ regression (2024) and the CompatID workaround.**
+// Apple changed Mission Control internals in macOS Sonoma 14.5 such that
+// the historical window-to-space SPI no longer reliably moves windows. On
+// macOS 14.5+ we use the same workaround as yabai and Hammerspoon:
+//   1. tag the target Space with a temporary compat workspace ID,
+//   2. assign the window list to that workspace,
+//   3. clear the temporary compat ID from the Space.
+// On older macOS releases we keep the legacy `CGSMoveWindowsToManagedSpace`
+// path.
 
 import Foundation
 import AppKit
@@ -81,70 +91,92 @@ enum SpaceManager {
         return unsafeBitCast(sym, to: T.self)
     }
 
+    private static func lookupAny<T>(_ names: [String], as type: T.Type) -> T? {
+        for name in names {
+            if let symbol = lookup(name, as: type) {
+                return symbol
+            }
+        }
+        return nil
+    }
+
     // MARK: - Resolved SkyLight symbol bundle
     //
     // Resolved once upfront (lazy, on first access) rather than per-call.
     // This lets the public entry points fail fast — `nil` here means the
-    // feature is unavailable on this macOS and we should NEVER mutate
-    // partial state. Specifically: we resolve `addWindowsToSpaces` AND
-    // `removeWindowsFromSpaces` together so that `moveWindow` can't
-    // partially succeed (e.g. add succeeds, remove symbol missing,
-    // window left sticky on multiple Spaces with a misleading "Moved"
-    // log line).
+    // feature is unavailable on this macOS. Common read symbols are required;
+    // branch-specific move symbols are optional and checked immediately before
+    // use so older macOS releases do not require the newer compat symbols.
     //
     // Signatures sanity-checked against yabai (src/misc/extern.h) and
     // Hammerspoon (extensions/spaces/libspaces.m):
-    //   - CGSGetActiveSpace(cid)                              -> uint64_t
-    //   - CGSMainConnectionID()                               -> int
-    //   - CGSAddWindowsToSpaces(cid, wids, spaces)            -> CGError (Int32)
-    //   - CGSRemoveWindowsFromSpaces(cid, wids, spaces)       -> CGError (Int32)
-    //   - CGSCopySpacesForWindows(cid, mask, wids)            -> CFArrayRef (Copy = retained)
+    //   - CGSMainConnectionID()                                -> int
+    //   - CGSGetActiveSpace(cid)                               -> uint64_t
+    //   - CGSCopySpacesForWindows(cid, mask, wids)             -> CFArrayRef (Copy = retained)
+    //   - CGSMoveWindowsToManagedSpace(cid, wids, sid)         -> void
+    //   - SLSSpaceSetCompatID(cid, sid, workspace)             -> CGError (Int32)
+    //   - SLSSetWindowListWorkspace(cid, uint32_t*, count, ws) -> CGError (Int32)
     private struct ResolvedSymbols {
         let mainConnectionID: @convention(c) () -> Int32
         let getActiveSpace: @convention(c) (Int32) -> UInt64
-        // Add / Remove return CGError (Int32). Non-zero means WindowServer
-        // refused the request — we surface that as a thrown move failure
-        // so the caller can log it and the success-path "Moved" line never
-        // fires after a real WindowServer rejection.
-        let addWindowsToSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32
-        let removeWindowsFromSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32
         // Copy* returns a retained CFArray; we declare the binding as
         // `Unmanaged<CFArray>?` so a NULL return from the private API
         // doesn't crash on the unwrapped cast (which is what the original
         // non-optional `CFArray` declaration risked).
         let copySpacesForWindows: @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+        let moveWindowsToManagedSpace: (@convention(c) (Int32, CFArray, UInt64) -> Void)?
+        let spaceSetCompatID: (@convention(c) (Int32, UInt64, Int32) -> Int32)?
+        let setWindowListWorkspace: (@convention(c) (Int32, UnsafeMutablePointer<UInt32>, Int32, Int32) -> Int32)?
     }
 
-    /// Single resolution attempt at process start. `nil` means the feature
-    /// is unavailable on this OS (one or more required symbols missing,
-    /// or SkyLight itself didn't dlopen). All public methods gate on
-    /// this — no partial mutation is possible.
+    /// Single resolution attempt at process start. `nil` means the common
+    /// read-side feature is unavailable on this OS (one or more required
+    /// symbols missing, or SkyLight itself didn't dlopen). Move-only symbols
+    /// are checked in the relevant version branch before any mutation.
     private static let resolvedSymbols: ResolvedSymbols? = {
         guard skyLightHandle != nil else { return nil }
         guard
             let mainConnectionID: @convention(c) () -> Int32 =
-                lookup("CGSMainConnectionID", as: (@convention(c) () -> Int32).self),
+                lookupAny(["CGSMainConnectionID", "SLSMainConnectionID"],
+                          as: (@convention(c) () -> Int32).self),
             let getActiveSpace: @convention(c) (Int32) -> UInt64 =
-                lookup("CGSGetActiveSpace", as: (@convention(c) (Int32) -> UInt64).self),
-            let addWindowsToSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32 =
-                lookup("CGSAddWindowsToSpaces",
-                       as: (@convention(c) (Int32, CFArray, CFArray) -> Int32).self),
-            let removeWindowsFromSpaces: @convention(c) (Int32, CFArray, CFArray) -> Int32 =
-                lookup("CGSRemoveWindowsFromSpaces",
-                       as: (@convention(c) (Int32, CFArray, CFArray) -> Int32).self),
+                lookupAny(["CGSGetActiveSpace", "SLSGetActiveSpace"],
+                          as: (@convention(c) (Int32) -> UInt64).self),
             let copySpacesForWindows: @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>? =
-                lookup("CGSCopySpacesForWindows",
-                       as: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+                lookupAny(["CGSCopySpacesForWindows", "SLSCopySpacesForWindows"],
+                          as: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
         else {
             return nil
         }
+        let moveWindowsToManagedSpace: (@convention(c) (Int32, CFArray, UInt64) -> Void)? =
+            lookupAny(["CGSMoveWindowsToManagedSpace", "SLSMoveWindowsToManagedSpace"],
+                      as: (@convention(c) (Int32, CFArray, UInt64) -> Void).self)
+        let spaceSetCompatID: (@convention(c) (Int32, UInt64, Int32) -> Int32)? =
+            lookup("SLSSpaceSetCompatID",
+                   as: (@convention(c) (Int32, UInt64, Int32) -> Int32).self)
+        let setWindowListWorkspace:
+            (@convention(c) (Int32, UnsafeMutablePointer<UInt32>, Int32, Int32) -> Int32)? =
+            lookup("SLSSetWindowListWorkspace",
+                   as: (@convention(c) (Int32, UnsafeMutablePointer<UInt32>, Int32, Int32) -> Int32).self)
         return ResolvedSymbols(
             mainConnectionID: mainConnectionID,
             getActiveSpace: getActiveSpace,
-            addWindowsToSpaces: addWindowsToSpaces,
-            removeWindowsFromSpaces: removeWindowsFromSpaces,
-            copySpacesForWindows: copySpacesForWindows
+            copySpacesForWindows: copySpacesForWindows,
+            moveWindowsToManagedSpace: moveWindowsToManagedSpace,
+            spaceSetCompatID: spaceSetCompatID,
+            setWindowListWorkspace: setWindowListWorkspace
         )
+    }()
+
+    private static let compatWorkspaceID: Int32 = 0x79616265
+
+    /// True on macOS Sonoma 14.5 and later, where Apple changed Mission
+    /// Control internals enough that the legacy move SPI can silently no-op.
+    private static let needsCompatIDWorkaround: Bool = {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        if v.majorVersion > 14 { return true }
+        if v.majorVersion == 14 && v.minorVersion >= 5 { return true }
+        return false
     }()
 
     // MARK: - Public API
@@ -164,15 +196,15 @@ enum SpaceManager {
         return spaceID == 0 ? nil : spaceID
     }
 
-    /// Look up the topmost (front-most) window owned by the process with
-    /// PID `pid`, returning its CGWindowID. Returns `nil` if the process
-    /// has no matching window.
+    /// Look up the likely main window owned by the process with PID `pid`,
+    /// returning its CGWindowID. Returns `nil` if the process has no
+    /// matching window.
     ///
     /// Z-order: `CGWindowListCopyWindowInfo` returns windows ordered
-    /// front-to-back. The first hit is therefore the user's main OBS
-    /// window in the common single-window setup; in multi-window setups
-    /// we still pick the front-most because that's the window the user
-    /// is most likely to interact with after relaunch.
+    /// front-to-back, but OBS can briefly show splash/plugin/preferences
+    /// windows above the main window. We therefore choose the largest normal
+    /// layer-0 window owned by OBS instead of blindly taking the frontmost
+    /// candidate.
     ///
     /// `includeOffscreen`:
     ///   - `false` (default): only consider on-screen windows. Used
@@ -184,7 +216,7 @@ enum SpaceManager {
     ///     report as not-on-screen, and we'd silently fail to capture
     ///     the OBS window's Space membership in exactly the workflow
     ///     this feature was built for. Uses
-    ///     `kCGWindowListOptionAll` (== 0) instead.
+    ///     a list without `optionOnScreenOnly` instead.
     static func mainWindowID(forPID pid: pid_t, includeOffscreen: Bool = false) -> CGWindowID? {
         let opts: CGWindowListOption = includeOffscreen
             ? [.excludeDesktopElements]
@@ -192,26 +224,34 @@ enum SpaceManager {
         guard let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
+        var best: (wid: CGWindowID, area: CGFloat)?
         for entry in info {
             guard
-                let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+                let ownerPID = int32Value(entry[kCGWindowOwnerPID as String]),
                 ownerPID == pid,
-                let layerNumber = entry[kCGWindowLayer as String] as? Int,
+                let layerNumber = intValue(entry[kCGWindowLayer as String]),
                 layerNumber == 0  // Layer 0 = normal application window.
             else { continue }
 
             // Filter out tiny chrome/hidden windows that occasionally appear
-            // for OBS's IPC / WebSocket internals. The main window is always
-            // wider than 200pt; anything smaller is likely an off-axis helper.
-            if let bounds = entry[kCGWindowBounds as String] as? [String: Any],
-               let width = bounds["Width"] as? CGFloat, width < 200 {
+            // for OBS's IPC / WebSocket internals.
+            guard
+                let wid = uint32Value(entry[kCGWindowNumber as String]),
+                let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+                let width = cgFloatValue(bounds["Width"]),
+                let height = cgFloatValue(bounds["Height"]),
+                width >= 200,
+                height >= 120
+            else {
                 continue
             }
-            if let wid = entry[kCGWindowNumber as String] as? CGWindowID {
-                return wid
+
+            let area = width * height
+            if best == nil || area > best!.area {
+                best = (wid, area)
             }
         }
-        return nil
+        return best?.wid
     }
 
     /// Returns the Space ID the OBS main window is currently on, OR
@@ -243,17 +283,23 @@ enum SpaceManager {
         guard let wid = mainWindowID(forPID: pid, includeOffscreen: true) else {
             return nil
         }
-        // Filter out the SkyLight "no space" sentinel (0) before counting
-        // memberships — a result like [0, 12345] should be treated as
-        // single-Space.
-        let memberships = (spacesForWindow(wid, connection: connection) ?? [])
-            .filter { $0 != 0 }
+        guard let rawMemberships = spacesForWindow(wid, connection: connection) else {
+            ActivityLog.shared.log(.info,
+                "SkyLight returned no Space membership list for OBS window \(wid) before terminate")
+            return nil
+        }
+        // Filter out the SkyLight "no space" sentinel (0) and de-duplicate
+        // before counting; the ActivityLog line reports this normalized list
+        // so it is not mistaken for raw SkyLight output.
+        let memberships = normalizedSpaces(rawMemberships)
+        ActivityLog.shared.log(.info,
+            "OBS window \(wid) normalized Space membership before terminate: \(formatSpaceList(memberships))")
         guard memberships.count == 1 else {
             // Either zero Spaces (window is a hidden helper / SPI failure)
-            // or sticky/multi-Space — both are non-restorable. We log the
-            // multi-space case so the user can see why their feature
-            // didn't activate; the empty case has already produced a
-            // single warning via `logUnavailableOnce`.
+            // or sticky/multi-Space — both are non-restorable. The normalized
+            // membership list above makes the empty case visible; the
+            // multi-space case gets an extra explanation because it can be an
+            // intentional "All Desktops" assignment.
             if memberships.count > 1 {
                 ActivityLog.shared.log(.info,
                     "OBS window is on \(memberships.count) Spaces (sticky / all-desktops) — Space restore skipped to preserve assignment")
@@ -278,7 +324,13 @@ enum SpaceManager {
                               completion: @escaping (CGWindowID?) -> Void) {
         let deadline = Date().addingTimeInterval(timeout)
         func tick() {
-            if let wid = mainWindowID(forPID: pid) {
+            // Include off-screen windows: post-relaunch OBS can be assigned
+            // by macOS to a Space other than the user's current one (e.g.
+            // its prior Space), and an on-screen-only query would never see
+            // it — we'd time out without finding the very window we're
+            // about to move. The whole point of this feature is to relocate
+            // a window that's NOT on the user's current Space.
+            if let wid = mainWindowID(forPID: pid, includeOffscreen: true) {
                 DispatchQueue.main.async { completion(wid) }
                 return
             }
@@ -295,66 +347,52 @@ enum SpaceManager {
     /// SPI is unavailable. Throws `SpaceMoveError` on any failure path so the
     /// caller can log the specific reason.
     ///
-    /// Implementation note: SkyLight has TWO families of "move window to
-    /// space" symbols across macOS history. We call `CGSAddWindowsToSpaces`
-    /// followed by `CGSRemoveWindowsFromSpaces` for the OLD space rather
-    /// than `CGSMoveWindowsToManagedSpace` because the move variant has a
-    /// known race on macOS 14+ where a recently-relaunched window can be
-    /// silently rejected if SkyLight hasn't finished registering it. The
-    /// add+remove dance is the path Hammerspoon settled on after the same
-    /// regression and works reliably under stress.
+    /// Implementation note: SkyLight has two usable move paths here. On
+    /// macOS 14.5+ we use the SLS compat-ID dance from yabai/Hammerspoon; on
+    /// older releases we use the legacy managed-space move. Both paths are
+    /// followed by a fresh `CGSCopySpacesForWindows` query so a silent no-op
+    /// is reported as failure instead of a misleading success log.
     static func moveWindow(_ windowID: CGWindowID, toSpace spaceID: UInt64) throws {
-        // Fix #1: All required symbols are resolved upfront in
-        // `resolvedSymbols`. If anything is missing, treat the entire move
-        // as a hard failure BEFORE we mutate any Space membership — we
-        // never want a partial state where the window was added to the
-        // target Space but couldn't be removed from the others (sticky
-        // bug producing a misleading "Moved" log line).
         guard let symbols = resolvedSymbols else {
             throw SpaceMoveError.skyLightUnavailable
         }
         guard let connection = currentConnection() else {
             throw SpaceMoveError.skyLightUnavailable
         }
+        guard spaceID != 0 else {
+            throw SpaceMoveError.unexpectedEmptyResponse("target Space ID was 0")
+        }
 
-        // Fix #1 (current-space lookup): a nil return from
-        // `spacesForWindow` here means SkyLight refused to tell us where
-        // the window is (private-API failure). Continuing would mutate
-        // partial state — the add would land but we'd skip remove,
-        // leaving OBS sticky on whatever Spaces it was on plus the
-        // target. Treat as a hard failure. An empty (non-nil) return is
-        // tolerated: it means SkyLight reported the window is on no
-        // Spaces (rare; no remove needed, just an add).
-        guard let currentSpaces = spacesForWindow(windowID, connection: connection) else {
+        guard let rawCurrentSpaces = spacesForWindow(windowID, connection: connection) else {
             throw SpaceMoveError.unexpectedEmptyResponse(
                 "spacesForWindow(\(windowID)) returned nil before move")
         }
-
-        // Wrap inputs as CFArray of NSNumber (CGSSpaceID is uint64; the SPI
-        // takes a CFArray of NSNumber values).
-        let widValue = NSNumber(value: UInt32(windowID))
-        let spaceValue = NSNumber(value: spaceID)
-        let widsArray = [widValue] as CFArray
-        let spacesArray = [spaceValue] as CFArray
-
-        // Fix #2: SkyLight's add/remove return CGError (Int32). Zero =
-        // success, nonzero = WindowServer rejected the request. The
-        // previous `-> Void` declaration silently dropped failures and
-        // let the success log fire after a no-op move.
-        let addErr = symbols.addWindowsToSpaces(connection, widsArray, spacesArray)
-        guard addErr == 0 else {
-            throw SpaceMoveError.windowServerError(op: "CGSAddWindowsToSpaces", code: addErr)
+        let currentSpaces = normalizedSpaces(rawCurrentSpaces)
+        if currentSpaces.count == 1 && currentSpaces[0] == spaceID {
+            return
         }
 
-        // Remove from any other spaces it was on so the window doesn't
-        // remain "sticky" to multiple Spaces.
-        let otherSpaces = currentSpaces.filter { $0 != spaceID }
-        if !otherSpaces.isEmpty {
-            let removeArray = otherSpaces.map { NSNumber(value: $0) } as CFArray
-            let removeErr = symbols.removeWindowsFromSpaces(connection, widsArray, removeArray)
-            guard removeErr == 0 else {
-                throw SpaceMoveError.windowServerError(op: "CGSRemoveWindowsFromSpaces", code: removeErr)
+        if needsCompatIDWorkaround {
+            try moveWindowWithCompatID(windowID,
+                                       toSpace: spaceID,
+                                       connection: connection,
+                                       symbols: symbols)
+        } else {
+            guard let moveWindowsToManagedSpace = symbols.moveWindowsToManagedSpace else {
+                throw SpaceMoveError.symbolMissing("CGSMoveWindowsToManagedSpace")
             }
+            let windows = [NSNumber(value: UInt32(windowID))] as CFArray
+            moveWindowsToManagedSpace(connection, windows, spaceID)
+        }
+
+        guard let rawVerifiedSpaces = spacesForWindow(windowID, connection: connection) else {
+            throw SpaceMoveError.unexpectedEmptyResponse(
+                "spacesForWindow(\(windowID)) returned nil after move")
+        }
+        let verifiedSpaces = normalizedSpaces(rawVerifiedSpaces)
+        guard verifiedSpaces.count == 1 && verifiedSpaces[0] == spaceID else {
+            throw SpaceMoveError.moveVerificationFailed(
+                "window \(windowID) is on \(formatSpaceList(verifiedSpaces)) after requested move to \(spaceID)")
         }
     }
 
@@ -410,11 +448,14 @@ enum SpaceManager {
         /// SkyLight returned an empty result for an operation that should
         /// always have produced one (e.g. spacesForWindow on a valid wid).
         case unexpectedEmptyResponse(String)
-        /// WindowServer (via SkyLight) rejected an add/remove call with a
+        /// WindowServer (via SkyLight) rejected a compat-ID call with a
         /// nonzero CGError. Carries the operation name + raw error code so
         /// the failure shows up in ActivityLog with enough context to
         /// debug.
         case windowServerError(op: String, code: Int32)
+        /// A move call returned, but a fresh space-membership query did not
+        /// show the window assigned exactly to the requested Space.
+        case moveVerificationFailed(String)
 
         var description: String {
             switch self {
@@ -426,6 +467,8 @@ enum SpaceManager {
                 return "SkyLight returned empty: \(detail)"
             case .windowServerError(let op, let code):
                 return "SkyLight \(op) failed with CGError=\(code)"
+            case .moveVerificationFailed(let detail):
+                return "SkyLight move verification failed: \(detail)"
             }
         }
     }
@@ -434,9 +477,9 @@ enum SpaceManager {
 
     /// Look up the running app's SkyLight connection ID. Cached lazily — the
     /// connection persists for the lifetime of the process so we never need
-    /// to re-resolve it. Returns `nil` if `CGSMainConnectionID` is missing
-    /// from this macOS's SkyLight (extremely unlikely but possible on a
-    /// broken system).
+    /// to re-resolve it. Returns `nil` if the main-connection symbol is
+    /// missing from this macOS's SkyLight (extremely unlikely but possible
+    /// on a broken system).
     private static func currentConnection() -> Int32? {
         guard let symbols = resolvedSymbols else { return nil }
         let cid = symbols.mainConnectionID()
@@ -462,8 +505,87 @@ enum SpaceManager {
             return nil
         }
         let result = unmanaged.takeRetainedValue()
-        guard let spaces = result as? [NSNumber] else { return nil }
-        return spaces.map { $0.uint64Value }
+        let array = result as NSArray
+        var spaces: [UInt64] = []
+        for value in array {
+            guard let number = value as? NSNumber else { return nil }
+            spaces.append(number.uint64Value)
+        }
+        return spaces
+    }
+
+    private static func moveWindowWithCompatID(_ windowID: CGWindowID,
+                                               toSpace spaceID: UInt64,
+                                               connection: Int32,
+                                               symbols: ResolvedSymbols) throws {
+        guard let spaceSetCompatID = symbols.spaceSetCompatID else {
+            throw SpaceMoveError.symbolMissing("SLSSpaceSetCompatID")
+        }
+        guard let setWindowListWorkspace = symbols.setWindowListWorkspace else {
+            throw SpaceMoveError.symbolMissing("SLSSetWindowListWorkspace")
+        }
+
+        let setCompatErr = spaceSetCompatID(connection, spaceID, compatWorkspaceID)
+        guard setCompatErr == 0 else {
+            throw SpaceMoveError.windowServerError(op: "SLSSpaceSetCompatID(set)", code: setCompatErr)
+        }
+
+        var mutableWindowID = UInt32(windowID)
+        let workspaceErr = withUnsafeMutablePointer(to: &mutableWindowID) { pointer in
+            setWindowListWorkspace(connection, pointer, 1, compatWorkspaceID)
+        }
+        let clearCompatErr = spaceSetCompatID(connection, spaceID, 0)
+
+        guard workspaceErr == 0 else {
+            throw SpaceMoveError.windowServerError(op: "SLSSetWindowListWorkspace", code: workspaceErr)
+        }
+        guard clearCompatErr == 0 else {
+            throw SpaceMoveError.windowServerError(op: "SLSSpaceSetCompatID(clear)", code: clearCompatErr)
+        }
+    }
+
+    private static func normalizedSpaces(_ spaces: [UInt64]) -> [UInt64] {
+        var seen = Set<UInt64>()
+        var result: [UInt64] = []
+        for space in spaces where space != 0 && !seen.contains(space) {
+            seen.insert(space)
+            result.append(space)
+        }
+        return result
+    }
+
+    private static func formatSpaceList(_ spaces: [UInt64]) -> String {
+        guard !spaces.isEmpty else { return "[]" }
+        return "[" + spaces.map(String.init).joined(separator: ", ") + "]"
+    }
+
+    private static func uint32Value(_ value: Any?) -> UInt32? {
+        if let value = value as? UInt32 { return value }
+        if let number = value as? NSNumber { return number.uint32Value }
+        if let int = value as? Int { return UInt32(exactly: int) }
+        if let int32 = value as? Int32 { return UInt32(exactly: int32) }
+        return nil
+    }
+
+    private static func int32Value(_ value: Any?) -> Int32? {
+        if let value = value as? Int32 { return value }
+        if let number = value as? NSNumber { return number.int32Value }
+        if let int = value as? Int { return Int32(exactly: int) }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let number = value as? NSNumber { return number.intValue }
+        return nil
+    }
+
+    private static func cgFloatValue(_ value: Any?) -> CGFloat? {
+        if let value = value as? CGFloat { return value }
+        if let number = value as? NSNumber { return CGFloat(truncating: number) }
+        if let double = value as? Double { return CGFloat(double) }
+        if let int = value as? Int { return CGFloat(int) }
+        return nil
     }
 
     /// Emit a single activity-log line if SkyLight resolution failed, then
