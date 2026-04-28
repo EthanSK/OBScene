@@ -476,6 +476,21 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Sub-toggle that flips the script/restart ordering. Only
+                // meaningful when "Restart OBS before running" is on, so we
+                // hide it when restart is off — having it always visible
+                // would suggest it does something on its own when it doesn't.
+                if profile.wrappedValue.restartOBSBeforeRun {
+                    Toggle("Run script before restart", isOn: profile.runScriptBeforeRestart)
+                        .padding(.leading, 18)
+                        .padding(.top, 2)
+                    Text("Fire the script BEFORE quitting OBS, instead of after the relaunch. The script is launched detached either way, so it runs in parallel with the restart — wait inside the script itself if you need it to finish before OBS goes down.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 18)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -322,17 +322,65 @@ class DisplayMonitor {
         let hasScript = !profile.runScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         // If the profile has both a script AND `restartOBSBeforeRun`, the
-        // script must run *after* OBS has restarted (workaround for the
-        // Custom Browser Dock refresh limitation — full app restart is the
-        // only reliable way to make a dock pick up an updated URL). In that
-        // case we route the whole flow through `OBSAppController.restartOBS`,
-        // which gates on streaming/recording state and short-circuits if
-        // either is active. After the restart settles, we run the script
-        // and then resume the rest of the trigger pipeline (OBS actions).
+        // script must run around the OBS restart (workaround for the Custom
+        // Browser Dock refresh limitation — full app restart is the only
+        // reliable way to make a dock pick up an updated URL). The default
+        // ordering is restart-then-script, but the user can flip it via
+        // `runScriptBeforeRestart` so the script fires first while OBS is
+        // still alive (e.g. for scripts that talk to OBS over the WebSocket
+        // before tearing it down).
+        //
+        // Timing semantics for the new "script before restart" branch:
+        //   - The script is launched detached (same as the after-restart
+        //     path — see `ScriptRunner.run` — it's a fire-and-forget Process
+        //     under the user's login shell). We do NOT wait for it to finish
+        //     before kicking off the restart. That keeps the main app
+        //     responsive and matches the after-restart timing model. If the
+        //     script needs to land before OBS quits, the wait must happen
+        //     inside the script itself.
+        //   - We still route the restart through `OBSAppController.restartOBS`
+        //     so the streaming/recording short-circuit, throttle, and
+        //     concurrent-restart in-flight check all apply unchanged.
+        //   - Simulate Trigger correctness: in the script-before-restart
+        //     branch the script is fired BEFORE we call into restartOBS, so
+        //     the dry-run side effect lands regardless of how the restart
+        //     subsequently behaves (skipped, throttled, terminate timeout,
+        //     relaunch error, websocket-ready timeout). That preserves the
+        //     guarantee added in commit 338f70d that a Simulate click always
+        //     runs the activate script. We pass `isSimulated` through so the
+        //     `restartOBS` path keeps using its existing semantics (real
+        //     triggers abort the rest of the pipeline on restart failure;
+        //     simulated triggers do not need the legacy `beforeRun` re-fire
+        //     here because the script already ran).
         //
         // For all other cases (no script, or script but no restart), keep
         // the original synchronous behaviour.
         if hasScript && profile.restartOBSBeforeRun {
+            if profile.runScriptBeforeRestart {
+                ActivityLog.shared.log(.info, "Run-script-before-restart requested (\(profile.name))")
+                ActivityLog.shared.log(.info, "Running profile script (\(profile.name))")
+                ScriptRunner.run(script: profile.runScript, profileName: profile.name)
+
+                // Restart with a no-op `beforeRun` — the script has already
+                // been kicked off detached, so we don't want restartOBS to
+                // re-run it on either the happy path or any abort path.
+                OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
+                    guard let self = self else { return }
+
+                    // Same script-only fast-path check as the synchronous branch.
+                    if !Self.profileHasOBSWork(profile) { return }
+
+                    // Resume the OBS pipeline. Restart() leaves the WebSocket
+                    // either connected (happy path) or disconnected (the user
+                    // has recording/streaming active and we skipped restart,
+                    // OR the restart aborted on timeout — in both cases the
+                    // existing ensureConnected logic in `continueOBSPipeline`
+                    // handles it correctly).
+                    self.continueOBSPipeline(for: profile)
+                }
+                return
+            }
+
             ActivityLog.shared.log(.info, "Restart-before-run requested (\(profile.name))")
             OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
                 guard let self = self else { return }

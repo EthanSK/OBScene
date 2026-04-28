@@ -330,6 +330,29 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// upgrade.
     var restartOBSBeforeRun: Bool = false
 
+    /// When true (and `restartOBSBeforeRun` is also true), the profile's
+    /// `runScript` is fired BEFORE the OBS restart instead of after. Useful
+    /// when the script needs to run while OBS is still alive (e.g. talking to
+    /// OBS over the WebSocket itself, capturing OBS state, or prepping
+    /// something the restart will later consume).
+    ///
+    /// Timing semantics: the script is launched detached via
+    /// `ScriptRunner.run` (same as the after-restart path). We do NOT wait for
+    /// it to finish before kicking off the restart — the existing after-restart
+    /// path is also detached, and blocking the main app on a user-supplied
+    /// shell command would risk hangs. If you need the script to complete
+    /// before the restart starts, do the wait inside the script itself
+    /// (e.g. by exec-ing a wrapper that exits only when its side effects have
+    /// landed).
+    ///
+    /// No effect when `restartOBSBeforeRun` is false (the script always runs
+    /// before the OBS pipeline in that case anyway — there's no restart to
+    /// reorder against).
+    ///
+    /// Defaults to false to preserve the existing "restart then script"
+    /// ordering for upgraded profiles.
+    var runScriptBeforeRestart: Bool = false
+
     init() {}
 
     // Coding keys — we persist the legacy per-action flags under their
@@ -352,6 +375,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         case delayBetweenActions
         case runScript
         case restartOBSBeforeRun
+        case runScriptBeforeRestart
     }
 
     // Custom decoder for forward compatibility — new fields fall back to
@@ -387,6 +411,7 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? delayBetweenActions
         runScript = try container.decodeIfPresent(String.self, forKey: .runScript) ?? runScript
         restartOBSBeforeRun = try container.decodeIfPresent(Bool.self, forKey: .restartOBSBeforeRun) ?? restartOBSBeforeRun
+        runScriptBeforeRestart = try container.decodeIfPresent(Bool.self, forKey: .runScriptBeforeRestart) ?? runScriptBeforeRestart
     }
 
     /// Convenience: returns the config for a given action kind in this
