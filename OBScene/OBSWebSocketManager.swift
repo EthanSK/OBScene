@@ -1080,6 +1080,14 @@ class OBSWebSocketManager: ObservableObject {
             }
 
             if self.isConnected {
+                // OBS accepted our WebSocket handshake, which means it's
+                // past the Safe Mode dialog gate (the dialog blocks OBS's
+                // UI thread before the WebSocket server starts accepting
+                // connections). Cancel the watcher launchOBS() may have
+                // started so a subsequent quit/restart inside the watcher's
+                // 15s window doesn't emit a misleading "process exited /
+                // dialog never appeared" log.
+                SafeModeDialogDismisser.shared.cancelWatcher()
                 onReady(.connected)
                 return
             }
@@ -1619,6 +1627,16 @@ enum OBSAppController {
                                 }
                                 ActivityLog.shared.log(.info,
                                     "OBS ready, running script (\(profileName))")
+                                // The Safe Mode dialog (if it was going to
+                                // appear) blocks OBS's UI thread BEFORE the
+                                // WebSocket server starts accepting
+                                // connections. A successful WebSocket handshake
+                                // means OBS is past that gate, so the watcher
+                                // is now guaranteed to never fire. Cancel it
+                                // to avoid a misleading "process exited
+                                // before dialog appeared" log if OBS is later
+                                // quit or restarted again.
+                                SafeModeDialogDismisser.shared.cancelWatcher()
                                 // Step 7: settle delay so docks finish loading.
                                 DispatchQueue.main.asyncAfter(
                                     deadline: .now() + Self.postReadySettleSeconds

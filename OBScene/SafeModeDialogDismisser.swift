@@ -376,9 +376,12 @@ final class SafeModeDialogDismisser {
     private var accessibilityWarningPosted: Bool = false
     private let lock = NSLock()
 
-    /// Active in-flight watcher token. We allow only one per session — if
-    /// OBS is launched twice in quick succession, the second call is a no-op.
+    /// Active in-flight watcher token and the PID it's targeting. We keep
+    /// one watcher active at a time, but a fresh OBS launch (different pid)
+    /// supersedes an older watcher so restart races don't leave us watching
+    /// a dead process.
     private var activeToken: UUID?
+    private var activePID: pid_t?
 
     private init() {}
 
@@ -386,6 +389,24 @@ final class SafeModeDialogDismisser {
     /// invalid.
     func watchForDialog(runningApp: NSRunningApplication) {
         watchForDialog(pid: runningApp.processIdentifier)
+    }
+
+    /// Stop any in-flight watcher. Called by the restart-OBS flow once the
+    /// OBS WebSocket is confirmed ready: at that point the Safe Mode dialog
+    /// is not going to appear (it always blocks the OBS UI thread BEFORE the
+    /// WebSocket server starts accepting connections), so the watcher is
+    /// guaranteed dead-weight from here on. Cancelling avoids the misleading
+    /// "OBS process exited before dialog appeared" log if OBS is later quit
+    /// or restarted again while this watcher's 15s window is still open.
+    func cancelWatcher() {
+        lock.lock()
+        let wasActive = activeToken != nil
+        activeToken = nil
+        activePID = nil
+        lock.unlock()
+        if wasActive {
+            print("[OBScene] SafeModeDialogDismisser: watcher cancelled (OBS came up cleanly)")
+        }
     }
 
     /// Start a polling loop that watches OBS's windows for the safe-mode
@@ -405,14 +426,22 @@ final class SafeModeDialogDismisser {
         }
 
         lock.lock()
-        if activeToken != nil {
+        // Only no-op if we're already watching the SAME pid. A different pid
+        // means OBS got restarted (by us or another flow) and the old watcher
+        // is now staring at a dead process — supersede it.
+        if activeToken != nil, activePID == pid {
             lock.unlock()
-            return // already watching
+            return // already watching this exact pid
         }
         let token = UUID()
+        let replacedPID = activePID
         activeToken = token
+        activePID = pid
         lock.unlock()
 
+        if let replacedPID = replacedPID, replacedPID != pid {
+            print("[OBScene] SafeModeDialogDismisser: replacing watcher (old pid=\(replacedPID), new pid=\(pid))")
+        }
         print("[OBScene] SafeModeDialogDismisser: starting watcher (pid=\(pid), timeout=\(timeout)s)")
         ActivityLog.shared.log(.info, "Watching for OBS Safe Mode dialog")
 
@@ -443,9 +472,20 @@ final class SafeModeDialogDismisser {
             self.lock.unlock()
             guard stillActive else { return }
 
-            // Stop if the target process died.
+            // Stop if the target process died. Distinguish the benign case
+            // (OBS-by-bundle-id is still running, just under a different pid
+            // — happens if the user / another flow restarted OBS again) from
+            // the genuinely-bad case (OBS is gone entirely). Both cases stop
+            // the watcher, but the log message is much less alarming for the
+            // benign one.
             if NSRunningApplication(processIdentifier: pid) == nil {
-                self.finish(token: token, message: "OBS process exited before dialog appeared")
+                let stillRunning = NSWorkspace.shared.runningApplications.contains {
+                    $0.bundleIdentifier == "com.obsproject.obs-studio"
+                }
+                let message = stillRunning
+                    ? "OBS pid \(pid) gone but a fresh OBS is running — stopping Safe Mode watcher"
+                    : "OBS process exited before dialog appeared"
+                self.finish(token: token, message: message)
                 return
             }
 
@@ -477,7 +517,17 @@ final class SafeModeDialogDismisser {
 
     private func finish(token: UUID, message: String) {
         lock.lock()
-        if activeToken == token { activeToken = nil }
+        // Only the currently-active watcher gets to log its outcome — a
+        // stale watcher whose token was already superseded (replaced or
+        // cancelled) must stay silent so it doesn't emit a misleading
+        // "OBS process exited" or "Safe Mode dialog did not appear" log
+        // after the new watcher / no-watcher state has taken over.
+        guard activeToken == token else {
+            lock.unlock()
+            return
+        }
+        activeToken = nil
+        activePID = nil
         lock.unlock()
         print("[OBScene] SafeModeDialogDismisser: \(message)")
         ActivityLog.shared.log(.info, message)
