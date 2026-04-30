@@ -180,6 +180,93 @@ class ActivityLog: ObservableObject {
     }
 }
 
+// MARK: - Last triggered profile (for "Simulate Last Trigger")
+
+/// Snapshot of the most-recently-fired trigger, persisted in UserDefaults so
+/// the menu-bar "Simulate Last Trigger" button survives app restarts.
+///
+/// Stores the *profile id* + a few presentation hints (the profile name as it
+/// was at trigger time, the trigger event type, and timestamp). The simulated
+/// re-run looks the profile up by id at click time, so an edit/delete after
+/// the auto-trigger fires is handled gracefully (button disables itself when
+/// the profile no longer exists).
+struct LastTriggerRecord: Codable, Equatable {
+    /// The kind of hardware edge that originally fired the trigger. Surfaced
+    /// to the user as a one-line subtext on the menu row.
+    enum EventType: String, Codable {
+        case displayPlugIn = "display_plug_in"
+        case displayPlugOut = "display_plug_out"
+        case usbPlugIn = "usb_plug_in"
+        case usbPlugOut = "usb_plug_out"
+
+        var label: String {
+            switch self {
+            case .displayPlugIn: return "display plug-in"
+            case .displayPlugOut: return "display plug-out"
+            case .usbPlugIn: return "USB plug-in"
+            case .usbPlugOut: return "USB plug-out"
+            }
+        }
+    }
+
+    let profileId: UUID
+    let profileName: String
+    let firedAt: Date
+    let eventType: EventType
+}
+
+/// Singleton that records and persists the most-recently-fired trigger so the
+/// menu-bar "Simulate Last Trigger" item can re-run it. Backed by
+/// `UserDefaults.standard` so the value survives an app restart.
+class LastTriggerStore: ObservableObject {
+    static let shared = LastTriggerStore()
+
+    private static let userDefaultsKey = "OBScene.lastTriggerRecord.v1"
+
+    @Published private(set) var record: LastTriggerRecord?
+
+    private init() {
+        record = Self.loadFromDefaults()
+    }
+
+    /// Update the persisted record. Called from the trigger pipeline whenever
+    /// a real (non-simulated) trigger fires.
+    func record(profile: TriggerProfile, eventType: LastTriggerRecord.EventType) {
+        let r = LastTriggerRecord(
+            profileId: profile.id,
+            profileName: profile.name,
+            firedAt: Date(),
+            eventType: eventType
+        )
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.record = r
+            Self.saveToDefaults(r)
+        }
+    }
+
+    /// Resolve the persisted record's profile id to a live profile in the
+    /// current config. Returns nil if the user deleted or renamed the
+    /// profile; the menu row should show "Simulate Last Trigger (unavailable)"
+    /// in that case.
+    func currentProfile() -> TriggerProfile? {
+        guard let r = record else { return nil }
+        return ConfigStore.shared.config.profiles.first(where: { $0.id == r.profileId })
+    }
+
+    private static func loadFromDefaults() -> LastTriggerRecord? {
+        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(LastTriggerRecord.self, from: data)
+    }
+
+    private static func saveToDefaults(_ r: LastTriggerRecord) {
+        guard let data = try? JSONEncoder().encode(r) else { return }
+        UserDefaults.standard.set(data, forKey: userDefaultsKey)
+    }
+}
+
 enum UserNotifier {
     static func requestPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in

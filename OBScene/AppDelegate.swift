@@ -16,6 +16,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var profilesSummaryMenuItem: NSMenuItem!
     private var lastTriggerMenuItem: NSMenuItem!
     private var recordingStatusMenuItem: NSMenuItem!
+    /// "Simulate Last Trigger" — re-runs the most recently auto-fired profile.
+    /// Useful when OBS missed the original trigger (Safe Mode dialog, hung
+    /// WebSocket, dropped USB event). Disabled until at least one real
+    /// trigger has fired this install.
+    private var simulateLastTriggerMenuItem: NSMenuItem!
 
     /// Tokens for the closure-based NotificationCenter observers so we can
     /// remove exactly the registrations we added (and only those).
@@ -345,6 +350,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastTriggerMenuItem.isEnabled = false
         menu.addItem(lastTriggerMenuItem)
 
+        // "Simulate Last Trigger" — clickable row that re-fires whatever
+        // profile fired most recently. Lives directly below the trigger
+        // summary block so it's contextually adjacent to "Last trigger: ..."
+        // and visually separated from the standard menu commands by the
+        // existing separator below.
+        simulateLastTriggerMenuItem = NSMenuItem(
+            title: "Simulate Last Trigger",
+            action: #selector(simulateLastTrigger),
+            // ⌘⇧R — distinct from "Reconnect to OBS" which owns ⌘R.
+            keyEquivalent: "R"
+        )
+        simulateLastTriggerMenuItem.target = self
+        simulateLastTriggerMenuItem.keyEquivalentModifierMask = [.command, .shift]
+        simulateLastTriggerMenuItem.isEnabled = false
+        menu.addItem(simulateLastTriggerMenuItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -444,6 +465,101 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             recordingStatusMenuItem.title = "Trigger actions: \(actions.sorted().joined(separator: " + "))"
         }
+
+        refreshSimulateLastTriggerItem()
+    }
+
+    /// Recompute the "Simulate Last Trigger" menu row's title, subtitle, and
+    /// enabled state based on `LastTriggerStore.shared.record`. Called from
+    /// `refreshMenuState()` (which fires on `menuWillOpen` and on every
+    /// notification-driven menu refresh) so the "X minutes ago" label stays
+    /// fresh whenever the user opens the menu.
+    private func refreshSimulateLastTriggerItem() {
+        guard let item = simulateLastTriggerMenuItem else { return }
+
+        let store = LastTriggerStore.shared
+        guard let record = store.record else {
+            // No trigger has ever fired this install (or persistence was
+            // wiped). Disable the row and explain why.
+            item.title = "Simulate Last Trigger"
+            item.toolTip = "No triggers have fired yet."
+            item.attributedTitle = Self.simulateMenuAttributed(
+                title: "Simulate Last Trigger",
+                subtitle: "No triggers yet",
+                enabled: false
+            )
+            item.isEnabled = false
+            return
+        }
+
+        // The persisted profile id may have been deleted / renamed since the
+        // record was taken. Look it up against the live config.
+        let liveProfile = store.currentProfile()
+        let isAvailable = liveProfile != nil
+
+        let displayName = liveProfile?.name ?? record.profileName
+        let ageString = Self.relativeTimeString(since: record.firedAt)
+
+        let subtitle: String
+        if isAvailable {
+            subtitle = "Re-run \(displayName) (\(record.eventType.label), \(ageString))"
+        } else {
+            subtitle = "Profile deleted: \(record.profileName)"
+        }
+
+        item.title = "Simulate Last Trigger"
+        item.toolTip = subtitle
+        item.attributedTitle = Self.simulateMenuAttributed(
+            title: "Simulate Last Trigger",
+            subtitle: subtitle,
+            enabled: isAvailable
+        )
+        item.isEnabled = isAvailable
+    }
+
+    /// Build a two-line attributed title for the simulate menu item: the
+    /// primary action label on top, a dimmer subtitle underneath.
+    private static func simulateMenuAttributed(title: String,
+                                                subtitle: String,
+                                                enabled: Bool) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let primaryColor: NSColor = enabled ? .labelColor : .disabledControlTextColor
+        let secondaryColor: NSColor = enabled ? .secondaryLabelColor : .tertiaryLabelColor
+
+        result.append(NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.menuFont(ofSize: 0),
+                .foregroundColor: primaryColor
+            ]
+        ))
+        result.append(NSAttributedString(
+            string: "\n" + subtitle,
+            attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: secondaryColor
+            ]
+        ))
+        return result
+    }
+
+    /// "Just now" / "5m ago" / "2h ago" / "3d ago" — human-readable relative
+    /// time, kept short so the menu row doesn't wrap awkwardly.
+    private static func relativeTimeString(since date: Date) -> String {
+        let interval = max(0, Date().timeIntervalSince(date))
+        if interval < 60 {
+            return "just now"
+        }
+        let minutes = Int(interval / 60)
+        if minutes < 60 {
+            return "\(minutes)m ago"
+        }
+        let hours = Int(interval / 3600)
+        if hours < 24 {
+            return "\(hours)h ago"
+        }
+        let days = Int(interval / 86400)
+        return "\(days)d ago"
     }
 
     private func truncate(_ s: String, limit: Int) -> String {
@@ -483,6 +599,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         settingsWindow = window
+    }
+
+    /// Re-run the most recently auto-fired profile. Same code path as a real
+    /// trigger but with `isSimulated: true` so we don't recursively persist
+    /// the simulation as a new "last trigger" and the activity log + user
+    /// notification get tagged with "(simulated)" so the user can tell auto
+    /// from manual re-trigger.
+    @objc private func simulateLastTrigger() {
+        guard let record = LastTriggerStore.shared.record else {
+            ActivityLog.shared.log(.info,
+                "Simulate Last Trigger clicked, but no trigger has ever fired",
+                userVisible: true)
+            return
+        }
+        guard let profile = LastTriggerStore.shared.currentProfile() else {
+            ActivityLog.shared.log(.info,
+                "Simulate Last Trigger: profile '\(record.profileName)' was deleted",
+                userVisible: true)
+            UserNotifier.post(
+                title: "OBScene: cannot simulate",
+                body: "The profile that fired most recently (\(record.profileName)) no longer exists."
+            )
+            return
+        }
+        ActivityLog.shared.log(.info,
+            "Simulate Last Trigger requested (\(profile.name), \(record.eventType.label))",
+            userVisible: true)
+        // Edge case: even if the profile's `mode` is `.plugOut` and the
+        // matching device is currently still unplugged, we still re-run it.
+        // Point of the feature is to retry when OBS missed the original
+        // trigger — gating on hardware state would defeat that.
+        displayMonitor.executeTrigger(for: profile.id, isSimulated: true)
     }
 
     @objc private func reconnectOBS() {
@@ -551,17 +699,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         formatter.dateStyle = .short
         formatter.timeStyle = .medium
         let timeString = formatter.string(from: Date())
+        let isSimulated = (notification.userInfo?["isSimulated"] as? Bool) ?? false
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.lastTriggerMenuItem.title = "Last trigger: \(timeString)"
+            let simTag = isSimulated ? " (simulated)" : ""
+            self.lastTriggerMenuItem.title = "Last trigger: \(timeString)\(simTag)"
             self.refreshMenuState()
 
             // Extract profile from notification if available.
             let profile = notification.userInfo?["profile"] as? TriggerProfile
             let profileName = profile?.name ?? "Unknown"
 
-            var parts: [String] = ["Profile: \(profileName) (\(profile?.mode.shortLabel ?? "plug in"))"]
+            // Record auto-fired plug-in triggers so the menu's "Simulate Last
+            // Trigger" item can re-run them later. Skip on simulated re-runs
+            // — we only persist real hardware-edge events so the simulate
+            // button always re-fires the most-recent *automatic* trigger.
+            if !isSimulated, let p = profile {
+                let eventType: LastTriggerRecord.EventType
+                switch p.triggerType {
+                case .display:   eventType = .displayPlugIn
+                case .usbDevice: eventType = .usbPlugIn
+                }
+                LastTriggerStore.shared.record(profile: p, eventType: eventType)
+            }
+
+            var parts: [String] = ["Profile: \(profileName) (\(profile?.mode.shortLabel ?? "plug in"))\(simTag)"]
             if let p = profile {
                 if !p.selectedSceneCollection.isEmpty {
                     parts.append("Collection → \(p.selectedSceneCollection)")
@@ -577,25 +740,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let body = parts.joined(separator: "\n")
 
             UserNotifier.post(
-                title: "OBScene trigger fired",
+                title: isSimulated ? "OBScene trigger re-fired (simulated)" : "OBScene trigger fired",
                 body: body
             )
         }
     }
 
     @objc private func displayUnplugTriggerFired(_ notification: Notification) {
+        let isSimulated = (notification.userInfo?["isSimulated"] as? Bool) ?? false
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             let profile = notification.userInfo?["profile"] as? TriggerProfile
             let profileName = profile?.name ?? "Unknown"
+            let simTag = isSimulated ? " (simulated)" : ""
 
-            var parts: [String] = ["Profile: \(profileName) (plug out)"]
+            // Record auto-fired plug-out triggers (mirrors the plug-in path).
+            if !isSimulated, let p = profile {
+                let eventType: LastTriggerRecord.EventType
+                switch p.triggerType {
+                case .display:   eventType = .displayPlugOut
+                case .usbDevice: eventType = .usbPlugOut
+                }
+                LastTriggerStore.shared.record(profile: p, eventType: eventType)
+            }
+
+            var parts: [String] = ["Profile: \(profileName) (plug out)\(simTag)"]
             if let p = profile {
                 parts.append(contentsOf: Self.actionSummaries(for: p))
             }
             let body = parts.joined(separator: "\n")
             UserNotifier.post(
-                title: "OBScene: plug-out trigger fired",
+                title: isSimulated
+                    ? "OBScene: plug-out trigger re-fired (simulated)"
+                    : "OBScene: plug-out trigger fired",
                 body: body
             )
             self.refreshMenuState()

@@ -437,7 +437,7 @@ class DisplayMonitor {
                         // OR the restart aborted on timeout — in both cases the
                         // existing ensureConnected logic in `continueOBSPipeline`
                         // handles it correctly).
-                        self.continueOBSPipeline(for: profile)
+                        self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
                     }
                 }
                 return
@@ -462,7 +462,7 @@ class DisplayMonitor {
                 // restart aborted on timeout — in both cases the existing
                 // ensureConnected logic in `continueOBSPipeline` handles it
                 // correctly).
-                self.continueOBSPipeline(for: profile)
+                self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
             }
             return
         }
@@ -486,19 +486,19 @@ class DisplayMonitor {
             return
         }
 
-        continueOBSPipeline(for: profile)
+        continueOBSPipeline(for: profile, isSimulated: isSimulated)
     }
 
     /// Drives the OBS-connection / action-firing tail of the trigger pipeline.
     /// Extracted from `executeTrigger` so the restart-OBS-before-run flow can
     /// also call into it once the restart settles.
-    private func continueOBSPipeline(for profile: TriggerProfile) {
+    private func continueOBSPipeline(for profile: TriggerProfile, isSimulated: Bool = false) {
         let config = ConfigStore.shared.config
         let obs = OBSWebSocketManager.shared
 
         // Fast path: already connected, fire immediately.
         if obs.isConnected {
-            runTriggerActions(for: profile)
+            runTriggerActions(for: profile, isSimulated: isSimulated)
             return
         }
 
@@ -527,7 +527,7 @@ class DisplayMonitor {
                 guard let self = self else { return }
                 switch result {
                 case .connected:
-                    self.runTriggerActions(for: profile)
+                    self.runTriggerActions(for: profile, isSimulated: isSimulated)
                 case .cancelled:
                     print("[OBScene] Auto-launch cancelled for '\(profile.name)'")
                 case .obsNotInstalled:
@@ -610,18 +610,25 @@ class DisplayMonitor {
     /// list has been rebuilt yet.
     private static let collectionSettleDelay:    TimeInterval = 0.5  // 500ms
 
-    private func runTriggerActions(for profile: TriggerProfile) {
+    private func runTriggerActions(for profile: TriggerProfile, isSimulated: Bool = false) {
         let obs = OBSWebSocketManager.shared
 
-        print("[OBScene] Trigger fired for '\(profile.name)' (\(profile.mode.shortLabel))! Executing OBS actions...")
-        ActivityLog.shared.log(.triggerFired, "Trigger fired — executing actions (\(profile.name))")
+        let simTag = isSimulated ? " (simulated)" : ""
+        print("[OBScene] Trigger fired for '\(profile.name)' (\(profile.mode.shortLabel))!\(simTag) Executing OBS actions...")
+        ActivityLog.shared.log(.triggerFired,
+            "Trigger fired — executing actions (\(profile.name))\(simTag)")
 
         // Both plug-in and plug-out fire the same notification; consumers can
-        // inspect `profile.mode` if they care.
+        // inspect `profile.mode` if they care. The userInfo's `isSimulated`
+        // flag lets observers (AppDelegate's last-trigger recorder + user
+        // notification poster) distinguish auto from manual re-trigger.
         NotificationCenter.default.post(
             name: profile.mode == .plugOut ? .displayUnplugTriggerFired : .displayTriggerFired,
             object: nil,
-            userInfo: ["profile": profile]
+            userInfo: [
+                "profile": profile,
+                "isSimulated": isSimulated
+            ]
         )
 
         // Profile FIRST, scene collection SECOND. See the MARK comment above

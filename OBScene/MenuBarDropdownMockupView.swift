@@ -102,9 +102,14 @@ struct MenuBarDropdownMockupView: View {
                       iconColor: .white.opacity(0.75),
                       text: "Last trigger: Today, 9:39:14 AM")
 
+            simulateRow(title: "Simulate Last Trigger",
+                        subtitle: "Re-run Docked Stream (display plug-in, 3m ago)",
+                        shortcut: "⇧⌘R",
+                        highlighted: true)
+
             separator
 
-            actionRow(title: "Settings…", shortcut: "⌘,", highlighted: true)
+            actionRow(title: "Settings…", shortcut: "⌘,")
             actionRow(title: "Reconnect to OBS", shortcut: "⌘R")
 
             separator
@@ -156,6 +161,40 @@ struct MenuBarDropdownMockupView: View {
                 Text(shortcut)
                     .font(.system(size: 12))
                     .foregroundColor(highlighted ? Color.white.opacity(0.85) : Color.white.opacity(0.55))
+            }
+        }
+        .font(.system(size: 13))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(highlighted ? Color.accentColor : Color.clear)
+        )
+    }
+
+    /// Two-line action row used by "Simulate Last Trigger" — primary action
+    /// label on top, dimmer subtitle beneath. Mirrors the attributed-title
+    /// rendering in `AppDelegate.simulateMenuAttributed(...)`.
+    private func simulateRow(title: String,
+                             subtitle: String,
+                             shortcut: String?,
+                             highlighted: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .foregroundColor(highlighted ? .white : Color.white.opacity(0.92))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(highlighted ? Color.white.opacity(0.85) : Color.white.opacity(0.55))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 12)
+            if let shortcut = shortcut {
+                Text(shortcut)
+                    .font(.system(size: 12))
+                    .foregroundColor(highlighted ? Color.white.opacity(0.85) : Color.white.opacity(0.55))
+                    .padding(.top, 1)
             }
         }
         .font(.system(size: 13))
