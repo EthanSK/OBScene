@@ -908,6 +908,22 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider().padding(.vertical, 1)
+
+                // Task added 2026-07-11: toggle for the menu-bar
+                // "Simulate Trigger" submenu. Default ON. When off, the
+                // per-trigger simulate items are hidden from the menu bar;
+                // "Simulate Last Trigger" is unaffected. The AppDelegate menu
+                // refresh reads `showSimulateAnyTriggerMenu` on every
+                // menuWillOpen, so flipping this takes effect the next time
+                // the menu is opened — no relaunch needed.
+                Toggle("Show \"Simulate Trigger\" submenu in the menu bar",
+                       isOn: $configStore.config.showSimulateAnyTriggerMenu)
+                Text("Adds a \"Simulate Trigger\" submenu to the menu-bar dropdown (under \"Simulate Last Trigger\") that lists every profile so you can fire any of them with one click. Turn off to hide it; \"Simulate Last Trigger\" always stays.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
