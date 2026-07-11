@@ -14,6 +14,10 @@ struct ActivityEvent: Identifiable, Equatable {
         case streamingStarted
         case virtualCamStarted
         case replayBufferStarted
+        case fileTransferStarted
+        case fileTransferCompleted
+        case fileTransferFailed
+        case fileDeleted
         case info
 
         var symbol: String {
@@ -28,6 +32,10 @@ struct ActivityEvent: Identifiable, Equatable {
             case .streamingStarted: return "dot.radiowaves.left.and.right"
             case .virtualCamStarted: return "web.camera"
             case .replayBufferStarted: return "memorychip"
+            case .fileTransferStarted: return "arrow.right.doc.on.clipboard"
+            case .fileTransferCompleted: return "checkmark.shield.fill"
+            case .fileTransferFailed: return "externaldrive.badge.exclamationmark"
+            case .fileDeleted: return "trash.slash"
             case .info: return "info.circle"
             }
         }
@@ -43,7 +51,9 @@ struct ActivityEvent: Identifiable, Equatable {
                  .usbDeviceConnected, .usbDeviceDisconnected,
                  .triggerScheduled, .triggerFired,
                  .recordingStarted, .streamingStarted,
-                 .virtualCamStarted, .replayBufferStarted:
+                 .virtualCamStarted, .replayBufferStarted,
+                 .fileTransferStarted, .fileTransferCompleted,
+                 .fileTransferFailed, .fileDeleted:
                 return true
             case .info:
                 return false
@@ -638,6 +648,12 @@ struct AppConfig: Codable, Equatable {
     var autoLaunchOBS: Bool = true
     var obsLaunchTimeoutSeconds: Int = 30
 
+    /// Independent automatic recording-transfer setups. Keeping these at the
+    /// app level (rather than inside OBS trigger profiles) lets a transfer run
+    /// whenever its physical destination volume appears, even if OBS is not
+    /// connected or the recording was produced by another application.
+    var fileTransferRules: [FileTransferRule] = []
+
     /// Ordered list of trigger profiles. Each profile has its own trigger type,
     /// mode (plug-in / plug-out), OBS configuration, and actions. Multiple
     /// can be active simultaneously.
@@ -692,6 +708,7 @@ struct AppConfig: Codable, Equatable {
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
         autoLaunchOBS = try container.decodeIfPresent(Bool.self, forKey: .autoLaunchOBS) ?? autoLaunchOBS
         obsLaunchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .obsLaunchTimeoutSeconds) ?? obsLaunchTimeoutSeconds
+        fileTransferRules = try container.decodeIfPresent([FileTransferRule].self, forKey: .fileTransferRules) ?? fileTransferRules
         profiles = try container.decodeIfPresent([TriggerProfile].self, forKey: .profiles) ?? profiles
         selectedProfileIndex = try container.decodeIfPresent(Int.self, forKey: .selectedProfileIndex) ?? selectedProfileIndex
 
@@ -900,6 +917,12 @@ class ConfigStore: ObservableObject {
         }
         config.migrateToProfilesIfNeeded()
         config.expandLegacyProfilesIfNeeded()
+    }
+
+    /// Isolated store for offscreen visual QA. It never reads or writes the
+    /// user's singleton unless the rendered controls are actually edited.
+    init(previewConfig: AppConfig) {
+        config = previewConfig
     }
 
     private func save() {

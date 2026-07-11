@@ -98,6 +98,9 @@ struct MenuBarDropdownMockupView: View {
             statusRow(icon: "bolt.fill",
                       iconColor: .yellow,
                       text: "Trigger actions: Record + Replay Buffer")
+            statusRow(icon: "externaldrive.fill",
+                      iconColor: .green,
+                      text: "Transfers: Ready")
             statusRow(icon: "clock",
                       iconColor: .white.opacity(0.75),
                       text: "Last trigger: Today, 9:39:14 AM")
@@ -111,6 +114,7 @@ struct MenuBarDropdownMockupView: View {
 
             actionRow(title: "Settings…", shortcut: "⌘,")
             actionRow(title: "Reconnect to OBS", shortcut: "⌘R")
+            actionRow(title: "Check File Transfers Now", shortcut: nil)
 
             separator
 

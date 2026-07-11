@@ -3,6 +3,13 @@ import ServiceManagement
 import AppKit
 
 struct SettingsView: View {
+    private enum SettingsSection: String, CaseIterable, Identifiable {
+        case obsAutomation = "OBS Automation"
+        case fileTransfers = "File Transfers"
+
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject var configStore: ConfigStore
     @EnvironmentObject var obsManager: OBSWebSocketManager
     @ObservedObject private var activityLog = ActivityLog.shared
@@ -12,6 +19,7 @@ struct SettingsView: View {
     @State private var obsPort: String = ""
     @State private var obsPassword: String = ""
     @State private var isConnecting = false
+    @State private var settingsSection: SettingsSection = .obsAutomation
 
     @State private var launchAtLogin: Bool = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil
     @State private var launchAtLoginError: String? = nil
@@ -117,9 +125,28 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            twoColumnLayout
-            singleColumnLayout
+        VStack(spacing: 0) {
+            Picker("Settings section", selection: $settingsSection) {
+                ForEach(SettingsSection.allCases) { section in
+                    Text(section.rawValue).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 360)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            switch settingsSection {
+            case .obsAutomation:
+                ViewThatFits(in: .horizontal) {
+                    twoColumnLayout
+                    singleColumnLayout
+                }
+            case .fileTransfers:
+                FileTransferSettingsView()
+                    .environmentObject(configStore)
+            }
         }
         .frame(minWidth: 560, minHeight: 400)
         .onAppear {

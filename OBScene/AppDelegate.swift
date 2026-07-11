@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let usbMonitor = USBMonitor.shared
     private let obsManager = OBSWebSocketManager.shared
     private let configStore = ConfigStore.shared
+    private let fileTransferManager = FileTransferManager.shared
 
     // Menu items that need to be updated live.
     private var obsStatusMenuItem: NSMenuItem!
@@ -16,6 +17,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var profilesSummaryMenuItem: NSMenuItem!
     private var lastTriggerMenuItem: NSMenuItem!
     private var recordingStatusMenuItem: NSMenuItem!
+    private var fileTransferStatusMenuItem: NSMenuItem!
+    private var runFileTransfersMenuItem: NSMenuItem!
     /// "Simulate Last Trigger" — re-runs the most recently auto-fired profile.
     /// Useful when OBS missed the original trigger (Safe Mode dialog, hung
     /// WebSocket, dropped USB event). Disabled until at least one real
@@ -60,12 +63,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
 
+        // Dedicated visual-QA render for the new transfer setup surface. It
+        // intentionally uses the real persisted rules (normally empty on the
+        // first run) without starting volume monitoring or touching files.
+        if let outputPath = ProcessInfo.processInfo.environment["OBSCENE_RENDER_FILE_TRANSFERS"] {
+            renderFileTransfersToPNG(path: outputPath)
+            exit(0)
+        }
+
         beginAppNapSuppression()
 
         setupMenuBar()
         UserNotifier.requestPermission()
         displayMonitor.startMonitoring()
         usbMonitor.startMonitoring()
+        fileTransferManager.startMonitoring()
         connectToOBSIfConfigured()
 
         // Boot Sparkle auto-updater.
@@ -120,6 +132,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        notificationObservers.append(
+            center.addObserver(forName: .fileTransferStateChanged, object: nil, queue: .main) { [weak self] _ in
+                self?.refreshMenuState()
+            }
+        )
+
         // Refresh menu state once up-front.
         refreshMenuState()
 
@@ -163,6 +181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         displayMonitor.stopMonitoring()
         usbMonitor.stopMonitoring()
+        fileTransferManager.stopMonitoring()
         obsManager.disconnect()
 
         let center = NotificationCenter.default
@@ -346,6 +365,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         recordingStatusMenuItem.isEnabled = false
         menu.addItem(recordingStatusMenuItem)
 
+        fileTransferStatusMenuItem = NSMenuItem(title: "Transfers: Not configured", action: nil, keyEquivalent: "")
+        fileTransferStatusMenuItem.isEnabled = false
+        menu.addItem(fileTransferStatusMenuItem)
+
         lastTriggerMenuItem = NSMenuItem(title: "Last trigger: Never", action: nil, keyEquivalent: "")
         lastTriggerMenuItem.isEnabled = false
         menu.addItem(lastTriggerMenuItem)
@@ -375,6 +398,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let reconnectItem = NSMenuItem(title: "Reconnect to OBS", action: #selector(reconnectOBS), keyEquivalent: "r")
         reconnectItem.target = self
         menu.addItem(reconnectItem)
+
+        runFileTransfersMenuItem = NSMenuItem(
+            title: "Check File Transfers Now",
+            action: #selector(runFileTransfersNow),
+            keyEquivalent: ""
+        )
+        runFileTransfersMenuItem.target = self
+        menu.addItem(runFileTransfersMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -465,6 +496,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             recordingStatusMenuItem.title = "Trigger actions: \(actions.sorted().joined(separator: " + "))"
         }
+
+        fileTransferStatusMenuItem.title = truncate(fileTransferManager.menuSummary, limit: 72)
+        runFileTransfersMenuItem.isEnabled = !config.fileTransferRules.isEmpty
 
         refreshSimulateLastTriggerItem()
     }
@@ -644,6 +678,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func runFileTransfersNow() {
+        fileTransferManager.runNow()
+    }
+
     @objc private func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
 
@@ -817,6 +855,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         settingsWindow = nil
+    }
+}
+
+extension AppDelegate {
+    fileprivate func renderFileTransfersToPNG(path: String) {
+        let renderWidth: CGFloat = 980
+        let renderHeight: CGFloat = 720
+        var previewConfig = configStore.config
+        if previewConfig.fileTransferRules.isEmpty {
+            var previewRule = FileTransferRule()
+            previewRule.name = "OBS Recordings → LaCie Archive"
+            previewRule.sourceFolderPath = "/Users/Ethan/Movies/OBS Recordings"
+            previewRule.destinationVolumeUUID = "PREVIEW-VOLUME"
+            previewRule.destinationVolumeName = "LaCie Archive"
+            previewRule.destinationRelativePath = "Backups/OBS Recordings"
+            previewConfig.fileTransferRules = [previewRule]
+        }
+        let previewStore = ConfigStore(previewConfig: previewConfig)
+        let view = FileTransferSettingsView()
+            .environmentObject(previewStore)
+            .frame(width: renderWidth, height: renderHeight)
+            .background(Color(NSColor.windowBackgroundColor))
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: renderWidth, height: renderHeight)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        hosting.layoutSubtreeIfNeeded()
+
+        let scale: CGFloat = 2
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(renderWidth * scale),
+            pixelsHigh: Int(renderHeight * scale),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 32
+        ) else { return }
+        bitmap.size = NSSize(width: renderWidth, height: renderHeight)
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 }
 

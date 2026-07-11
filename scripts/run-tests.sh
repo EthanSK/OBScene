@@ -5,6 +5,7 @@
 #   1. VerifiedSetEngine retry/verify state machine (2026-04-18 bug fix).
 #   2. SafeModeDialogDismisser decision logic (2026-04-18 Safe Mode auto-
 #      dismissal feature — v1.26).
+#   3. File-transfer copy/hash/retention destructive gate.
 #
 # Each binary is produced with `swiftc -parse-as-library` and has its own
 # `@main` entrypoint, so they must be compiled separately.
@@ -41,8 +42,21 @@ echo "[test] compiling SafeModeDialogDismisser tests -> $SAFEMODE_BIN"
 xcrun swiftc \
   -parse-as-library \
   -o "$SAFEMODE_BIN" \
+  "$ROOT/OBScene/FileTransferModels.swift" \
   "$ROOT/OBScene/ConfigStore.swift" \
   "$ROOT/OBScene/SafeModeDialogDismisser.swift" \
   "$ROOT/scripts/test-safe-mode-dismisser.swift"
 echo "[test] running SafeModeDialogDismisser tests"
 "$SAFEMODE_BIN"
+
+# --- 3. FileTransferEngine -----------------------------------------------
+TRANSFER_BIN="$BUILD_DIR/obscene-file-transfer-tests"
+echo "[test] compiling FileTransferEngine tests -> $TRANSFER_BIN"
+xcrun swiftc \
+  -parse-as-library \
+  -o "$TRANSFER_BIN" \
+  "$ROOT/OBScene/FileTransferModels.swift" \
+  "$ROOT/OBScene/FileTransferEngine.swift" \
+  "$ROOT/scripts/test-file-transfer-engine.swift"
+echo "[test] running FileTransferEngine tests"
+"$TRANSFER_BIN"

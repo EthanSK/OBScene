@@ -22,6 +22,10 @@
 		A10000120000000000000120 /* SpaceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000014000000000000014A /* SpaceManager.swift */; };
 		A10000130000000000000130 /* MenuBarDropdownMockupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000015000000000000015A /* MenuBarDropdownMockupView.swift */; };
 		A10000140000000000000140 /* OBSConnectionStatusPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000016000000000000016A /* OBSConnectionStatusPill.swift */; };
+		A10000180000000000000180 /* FileTransferModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000018000000000000018A /* FileTransferModels.swift */; };
+		A10000190000000000000190 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000019000000000000019A /* FileTransferEngine.swift */; };
+		A100001A00000000000001A0 /* FileTransferManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001A00000000000001AA /* FileTransferManager.swift */; };
+		A100001B00000000000001B0 /* FileTransferSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001B00000000000001BA /* FileTransferSettingsView.swift */; };
 		A10000150000000000000150 /* Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; };
 		A10000160000000000000160 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -45,6 +49,10 @@
 		A2000015000000000000015A /* MenuBarDropdownMockupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarDropdownMockupView.swift; sourceTree = "<group>"; };
 		A2000016000000000000016A /* OBSConnectionStatusPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OBSConnectionStatusPill.swift; sourceTree = "<group>"; };
 		A2000017000000000000017A /* Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Sparkle.framework; path = Frameworks/Sparkle.framework; sourceTree = SOURCE_ROOT; };
+		A2000018000000000000018A /* FileTransferModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferModels.swift; sourceTree = "<group>"; };
+		A2000019000000000000019A /* FileTransferEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferEngine.swift; sourceTree = "<group>"; };
+		A200001A00000000000001AA /* FileTransferManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferManager.swift; sourceTree = "<group>"; };
+		A200001B00000000000001BA /* FileTransferSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferSettingsView.swift; sourceTree = "<group>"; };
 		A30000010000000000000001 /* OBScene.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OBScene.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -101,6 +109,10 @@
 				A2000014000000000000014A /* SpaceManager.swift */,
 				A2000015000000000000015A /* MenuBarDropdownMockupView.swift */,
 				A2000016000000000000016A /* OBSConnectionStatusPill.swift */,
+				A2000018000000000000018A /* FileTransferModels.swift */,
+				A2000019000000000000019A /* FileTransferEngine.swift */,
+				A200001A00000000000001AA /* FileTransferManager.swift */,
+				A200001B00000000000001BA /* FileTransferSettingsView.swift */,
 				A20000070000000000000007 /* Info.plist */,
 				A20000080000000000000008 /* OBScene.entitlements */,
 			);
@@ -188,6 +200,10 @@
 				A10000120000000000000120 /* SpaceManager.swift in Sources */,
 				A10000130000000000000130 /* MenuBarDropdownMockupView.swift in Sources */,
 				A10000140000000000000140 /* OBSConnectionStatusPill.swift in Sources */,
+				A10000180000000000000180 /* FileTransferModels.swift in Sources */,
+				A10000190000000000000190 /* FileTransferEngine.swift in Sources */,
+				A100001A00000000000001A0 /* FileTransferManager.swift in Sources */,
+				A100001B00000000000001B0 /* FileTransferSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

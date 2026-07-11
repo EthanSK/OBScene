@@ -1,6 +1,6 @@
 # OBScene
 
-**OBS + Scene** — a macOS menu bar app that drives OBS Studio when your hardware changes.
+**OBS + Scene** — a macOS menu bar app that drives OBS Studio and safely moves finished recordings when your hardware changes.
 
 Plug in your battlestation displays, attach a USB capture device, or hit a custom trigger and OBScene takes care of the boring bits: it switches scene collection, profile, and active scene, then (optionally) starts recording, streaming, the virtual camera, or the replay buffer. Unplug and it cleans up just as quietly. Build as many profiles as you want — display profiles for the dock, USB profiles for the capture card, plug-in vs plug-out variants — and let OBScene wire them up. All hands-free, all local.
 
@@ -38,6 +38,8 @@ Plug in your battlestation displays, attach a USB capture device, or hit a custo
 - **Auto-launch OBS.** If OBS isn't running when a trigger fires, OBScene launches it and polls the WebSocket port until it comes up, then runs the actions.
 - **Browser refresh.** Optionally refreshes all open tabs in any running browser (Chrome, Safari, Arc, Brave, Edge, …) when a profile fires. Useful for browser-based stream overlays that get glitchy after a display change.
 - **Activity log.** A live in-app feed of every event — user-visible by default, with a verbose toggle that shows the full debug stream (restart pipeline checkpoints, WebSocket reconnects, sentinel sweeps, etc.). Also written to `~/Library/Logs/OBScene/activity.log`.
+- **Automatic recording transfers.** Choose a recordings folder on the Mac and a destination folder on an external drive. OBScene identifies the exact drive by filesystem UUID, starts when that drive mounts (and rechecks every 15 minutes while it remains attached), preserves subfolders, and posts start/completion/error notifications.
+- **Verified retention cleanup.** Every recording is copied through a hidden temporary file and SHA-256 verified at its final destination. The laptop original remains for 7 days by default (configurable); when it becomes eligible, OBScene hashes both files again while the backup drive is present. A missing or changed byte keeps the laptop copy and restarts the transfer clock.
 - **OBS WebSocket v5.** Talks to OBS via the built-in WebSocket server shipped with OBS 28+. No extra plugins. SHA-256 challenge-response auth.
 - **Native macOS.** Pure Swift + SwiftUI menu bar app. No dock icon, no Electron, no background tax.
 - **Launch at Login.** One toggle, backed by `ServiceManagement` (`SMAppService`).
@@ -127,6 +129,16 @@ To create a profile:
 
 Repeat for each profile you want. Close the settings window and you're done. OBScene runs quietly in the menu bar and reacts to your hardware in the background.
 
+## Configure automatic recording transfers
+
+1. Open **Settings…** and select **File Transfers** at the top.
+2. Click **Set Up Transfer…**, then choose the folder where OBS records on this Mac.
+3. Choose a destination folder on the external backup drive. The drive must be connected for this initial setup; after that OBScene recognizes it by filesystem UUID even if its name or `/Volumes` mount path changes.
+4. Leave **Keep laptop originals for 7 days** at its safe default, or choose another retention period.
+5. Keep **Enabled** on and enable **Launch at Login** under OBS Automation → General so OBScene is always watching.
+
+The first check runs immediately. Later checks run when the drive mounts, every 15 minutes while OBScene is open, or when you choose **Check File Transfers Now** from Settings or the menu bar. Files changed within the last two minutes are treated as active recordings and retried later. Interrupted or failed copies never make a laptop original eligible for deletion.
+
 ## How it works
 
 OBScene registers a `CGDisplayRegisterReconfigurationCallback` for display events and `IOServiceAddMatchingNotification` (via IOKit) for USB hot-plug events. Each event triggers a per-profile evaluation:
@@ -145,6 +157,8 @@ When a trigger fires, OBScene:
 
 Commands reach OBS over the WebSocket v5 protocol, with SHA-256 challenge-response authentication if you've set a password.
 
+File transfers are independent of the OBS connection. `NSWorkspace` mount notifications wake the transfer manager, which resolves the configured volume UUID to its current mount point. Each source file is streamed into a hidden sibling on the destination, the source is checked for changes during the copy, the final destination is independently SHA-256 hashed, and only then is an atomic manifest entry written under `~/Library/Application Support/OBScene/`. Retention deletion requires that manifest proof plus a fresh hash of both files.
+
 ## Caveats
 
 - **Private SkyLight SPI for Space restoration.** OBScene calls undocumented `SkyLight.framework` symbols (the same ones yabai, Hammerspoon, Rectangle, etc. use) to capture the Space the OBS window was on and move it back after a restart. These have been stable for ~10 macOS versions but Apple could break them on any major release; OBScene resolves them dynamically via `dlsym` and degrades to a no-op (with a single warning in the activity log) if a symbol disappears.
@@ -152,6 +166,7 @@ Commands reach OBS over the WebSocket v5 protocol, with SHA-256 challenge-respon
 - **Accessibility permission required for Safe-Mode dismiss.** OBScene needs Accessibility permission to detect and click through OBS's "did not shut down properly" modal. Without it the rest of the app works fine; only the auto-dismiss feature silently no-ops.
 - **OBS restart never kills a live capture.** If OBS is currently recording or streaming, the **Restart OBS before run** toggle is honoured *only* after the active outputs stop cleanly. If they don't stop within ~20s, OBScene aborts the restart rather than risk corrupting an active recording.
 - **Run-on-activate runs arbitrary shell.** This is a deliberate power-user escape hatch (e.g. `restream-channel-switch …`), not a sandboxed API. Only configure scripts you trust.
+- **The backup drive must be mounted for cleanup.** OBScene never deletes a retained laptop original using stale history alone. If the drive is absent, the rule waits; if the destination is missing or fails its fresh hash, the original stays and is copied again.
 - **Not on the App Store.** OBScene needs IOKit, AppleScript, accessibility, and private SkyLight access — none of which are sandbox-friendly. It ships as a Developer ID-signed, notarised universal binary distributed via GitHub Releases.
 - **Universal binary distribution only.** No Homebrew tap yet — installation is DMG/ZIP from the [Releases page](https://github.com/EthanSK/OBScene/releases/latest).
 
@@ -169,6 +184,10 @@ AppDelegate.swift             Menu bar item, settings window, notification wirin
 ConfigStore.swift             UserDefaults-backed AppConfig with multi-profile schema
 DisplayMonitor.swift          CoreGraphics display monitoring + per-profile trigger scheduling
 USBMonitor.swift              IOKit USB hot-plug monitoring + DiskArbitration volume label resolution
+FileTransferModels.swift      Transfer rules, manifest proof, and UI state types
+FileTransferEngine.swift      Hidden-temp copy, SHA-256 verification, destructive safety gate
+FileTransferManager.swift     Volume mount watcher, scheduling, manifest persistence, notifications
+FileTransferSettingsView.swift SwiftUI setup, retention, status, and manual-run UI
 OBSWebSocketManager.swift     OBS WebSocket v5 client + OBSAppController quit/relaunch pipeline
 SafeModeDialogDismisser.swift Accessibility-API watcher for the OBS "did not shut down properly" modal
 SpaceManager.swift            Private SkyLight SPI for Mission Control Space restoration
