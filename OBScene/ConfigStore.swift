@@ -695,6 +695,16 @@ struct AppConfig: Codable, Equatable {
     /// user who wants the legacy behaviour can flip this off in Settings.
     var restoreSpaceOnRestart: Bool = true
 
+    /// Controls the menu-bar "Simulate Trigger" submenu (the one-click
+    /// "simulate ANY of my triggers" feature added 2026-07-11). When true
+    /// (the default) the submenu appears directly under "Simulate Last
+    /// Trigger" and lists every configured profile so any of them can be
+    /// fired on demand. When false the submenu is hidden entirely; "Simulate
+    /// Last Trigger" is unaffected and always stays in the menu. Defaults to
+    /// ON so the feature is discoverable out of the box; a user who finds the
+    /// extra submenu cluttered can switch it off in Settings → General.
+    var showSimulateAnyTriggerMenu: Bool = true
+
     init() {}
 
     // Custom decoder so that adding new fields to `AppConfig` doesn't wipe out
@@ -729,6 +739,10 @@ struct AppConfig: Codable, Equatable {
         refreshBrowsersOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshBrowsersOnTrigger) ?? refreshBrowsersOnTrigger
         refreshOBSBrowserSourcesOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshOBSBrowserSourcesOnTrigger) ?? refreshOBSBrowserSourcesOnTrigger
         restoreSpaceOnRestart = try container.decodeIfPresent(Bool.self, forKey: .restoreSpaceOnRestart) ?? restoreSpaceOnRestart
+        // Missing key (older saved configs) falls back to the property default
+        // (true) — so the simulate-any-trigger menu is ON for existing users
+        // after they update, matching the "default = ON" spec.
+        showSimulateAnyTriggerMenu = try container.decodeIfPresent(Bool.self, forKey: .showSimulateAnyTriggerMenu) ?? showSimulateAnyTriggerMenu
     }
 
     /// Migrate legacy single-config settings into the profiles array. Called

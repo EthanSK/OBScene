@@ -24,6 +24,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// WebSocket, dropped USB event). Disabled until at least one real
     /// trigger has fired this install.
     private var simulateLastTriggerMenuItem: NSMenuItem!
+    /// "Simulate Trigger" submenu — one row per configured profile, each
+    /// firing that profile's actions on demand (same dry-run code path as
+    /// "Simulate Last Trigger"). Sits directly under the last-trigger row.
+    /// Added 2026-07-11. Its visibility is gated on
+    /// `config.showSimulateAnyTriggerMenu` (default ON); its submenu contents
+    /// are rebuilt on every menu open so newly added/renamed/deleted profiles
+    /// stay in sync.
+    private var simulateAnyTriggerMenuItem: NSMenuItem!
 
     /// Tokens for the closure-based NotificationCenter observers so we can
     /// remove exactly the registrations we added (and only those).
@@ -389,6 +397,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         simulateLastTriggerMenuItem.isEnabled = false
         menu.addItem(simulateLastTriggerMenuItem)
 
+        // "Simulate Trigger" submenu — lists every configured profile so the
+        // user can fire ANY trigger with one click (not just the last one).
+        // Same dry-run path as "Simulate Last Trigger". The submenu contents +
+        // this row's visibility are (re)computed in `refreshSimulateAnyTriggerItem()`,
+        // which runs on every menu open. We attach an empty NSMenu now so the
+        // disclosure arrow renders; it gets populated on first open.
+        simulateAnyTriggerMenuItem = NSMenuItem(
+            title: "Simulate Trigger",
+            action: nil,
+            keyEquivalent: ""
+        )
+        simulateAnyTriggerMenuItem.submenu = NSMenu()
+        menu.addItem(simulateAnyTriggerMenuItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -501,6 +523,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         runFileTransfersMenuItem.isEnabled = !config.fileTransferRules.isEmpty
 
         refreshSimulateLastTriggerItem()
+        refreshSimulateAnyTriggerItem()
+    }
+
+    /// Rebuild the "Simulate Trigger" submenu from the current config and
+    /// honour the `showSimulateAnyTriggerMenu` setting (Task 3). Called from
+    /// `refreshMenuState()` (fires on every `menuWillOpen`) so the profile
+    /// list, and the on/off visibility, stay in sync without a relaunch.
+    ///
+    /// When the setting is OFF we hide the whole row (`isHidden = true`) rather
+    /// than removing it, so the item's position in the menu is stable. When ON
+    /// but there are no profiles, we show a single disabled "No profiles"
+    /// placeholder so the submenu is never empty/confusing.
+    private func refreshSimulateAnyTriggerItem() {
+        guard let item = simulateAnyTriggerMenuItem else { return }
+
+        // Setting default is ON; only hide when the user explicitly disabled it.
+        let enabledFeature = configStore.config.showSimulateAnyTriggerMenu
+        item.isHidden = !enabledFeature
+        guard enabledFeature else { return }
+
+        let submenu = item.submenu ?? NSMenu()
+        submenu.removeAllItems()
+
+        let profiles = configStore.config.profiles
+        if profiles.isEmpty {
+            let empty = NSMenuItem(title: "No profiles configured", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            // One clickable row per profile. The profile id is stashed on
+            // `representedObject` so the single shared selector can resolve
+            // exactly which profile to fire — NSMenuItem actions can't carry a
+            // typed payload otherwise. A disabled profile still appears (the
+            // simulate path bypasses the isEnabled gate on purpose, matching
+            // Settings' "Simulate Trigger" button), but we annotate it so the
+            // user knows its live state.
+            for profile in profiles {
+                let suffix = profile.isEnabled ? "" : " (disabled)"
+                let row = NSMenuItem(
+                    title: "\(profile.name) — \(profile.mode.shortLabel)\(suffix)",
+                    action: #selector(simulateSpecificTrigger(_:)),
+                    keyEquivalent: ""
+                )
+                row.target = self
+                row.representedObject = profile.id
+                submenu.addItem(row)
+            }
+        }
+
+        item.submenu = submenu
     }
 
     /// Recompute the "Simulate Last Trigger" menu row's title, subtitle, and
@@ -665,6 +737,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Point of the feature is to retry when OBS missed the original
         // trigger — gating on hardware state would defeat that.
         displayMonitor.executeTrigger(for: profile.id, isSimulated: true)
+    }
+
+    /// Fire a specific profile's actions on demand from the "Simulate Trigger"
+    /// submenu (Task 2, 2026-07-11). Reads the profile id from the clicked
+    /// item's `representedObject`, then routes through the same dry-run path as
+    /// the Settings "Simulate Trigger" button (`runTestTrigger(for:)`): it
+    /// bypasses the profile's `isEnabled` gate, logs a user-visible activity
+    /// entry, and runs with `isSimulated: true` so this manual re-run does NOT
+    /// overwrite the persisted "last trigger" record.
+    @objc private func simulateSpecificTrigger(_ sender: NSMenuItem) {
+        guard let profileId = sender.representedObject as? UUID else { return }
+        guard let profile = configStore.config.profiles.first(where: { $0.id == profileId }) else {
+            // Profile was deleted between the menu opening and the click.
+            ActivityLog.shared.log(.info,
+                "Simulate Trigger: selected profile no longer exists",
+                userVisible: true)
+            return
+        }
+        displayMonitor.runTestTrigger(for: profile)
     }
 
     @objc private func reconnectOBS() {
