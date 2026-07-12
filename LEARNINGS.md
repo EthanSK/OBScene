@@ -24,6 +24,16 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-12T00:05:00Z
+**Trigger:** 2026-07-12 task: file-transfer keeps firing "everything is already transferred and verified" decently often
+**Symptom:** OBScene file-transfer over-triggered — repeated "Everything is already transferred and verified" notifications, without plugging in anything new.
+**Root cause:** `FileTransferManager.startMonitoring()` registered `NSWorkspace.didMountNotification` → `requestScan(reason: .driveMounted)` with NO check that the mounted volume was the rule's destination drive and NO edge detection. A dock connect emits a BURST of mount events; unrelated USB drives / disk images / network shares also fire `didMount`. With the backup drive already connected, every one of these re-ran the scan, found nothing new, and hit the no-op notification branch (`else if reason == .driveMounted || .manual`) → spam.
+**Fix:** Edge-only + debounced trigger in `FileTransferManager.swift`. Added `lastKnownMountedUUIDs` (seeded at launch); mount AND unmount now funnel through `handleMountChange()`, which fires a rule ONLY on a NOT-connected → connected rising edge of its `destinationVolumeUUID`. `connectSettleDelay` (3s) coalesces the dock burst; `reTriggerGuardInterval` (30s) swallows unplug→replug bounce so one physical connection = one run. The no-op branch is now log-only (`ActivityLog … userVisible:false`) instead of `UserNotifier.post` — only an actual transfer or a real error notifies. UI wording in `FileTransferSettingsView.swift` now states "Runs once when <drive> is plugged in (on connect)".
+**Commit:** (branch fix/file-transfer-edge-trigger — see PR)
+**Guard:** Thorough inline comments at the trigger site (edge + debounce rationale) + this entry. The no-op path can never notify again (log-only). Do NOT revert to scanning on every `didMount` — that is the spam.
+---
+
+---
 **Date:** 2026-07-11T14:48:08Z
 **Trigger:** 2026-07-11 task: 'plug-in didn't switch to right scene' (later retracted by Ethan as expected behavior)
 **Symptom:** OBScene 'plugged in and it didn't change to the right scene' — dock connect appeared to switch OBS to the wrong scene (coffee shop coding instead of 3000AD)
