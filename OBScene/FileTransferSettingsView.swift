@@ -55,7 +55,7 @@ struct FileTransferSettingsView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
 
-            Text("Copy finished recordings when their backup drive appears.")
+            Text("Runs once automatically the moment a backup drive is plugged in.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -128,7 +128,7 @@ struct FileTransferSettingsView: View {
                     .foregroundColor(.accentColor)
                 Text("Back up recordings automatically")
                     .font(.title2.bold())
-                Text("Choose the folder where recordings land on this Mac, then choose a folder on the backup drive. OBScene will recognize that exact drive whenever it is connected.")
+                Text("Choose the folder where recordings land on this Mac, then choose a folder on the backup drive. OBScene runs the transfer once, automatically, the moment that exact drive is plugged in.")
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 520)
@@ -228,6 +228,10 @@ struct FileTransferSettingsView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
+                        Text("Runs once when “\(rule.destinationVolumeName)” is plugged in (on connect). Reconnecting the same drive won’t re-run it unless there are new recordings.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text("Files changed within the last two minutes are treated as still recording and retried automatically.")
                             .font(.caption)
                             .foregroundColor(.secondary)

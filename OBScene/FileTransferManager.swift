@@ -32,6 +32,37 @@ final class FileTransferManager: ObservableObject {
     private var isMonitoring = false
     private var manifest: FileTransferManifest
 
+    // MARK: - Plug-in EDGE detection state
+    //
+    // The transfer must fire exactly ONCE when a rule's destination (backup) drive
+    // goes from NOT-connected -> connected. macOS posts didMount/didUnmount for
+    // EVERY volume, and a single dock connect emits a BURST of them; unrelated USB
+    // drives, disk images and network shares fire them too. So we cannot treat each
+    // mount event as a trigger. Instead we remember which volume UUIDs were mounted
+    // last time (`lastKnownMountedUUIDs`) and only act on a genuine rising edge for
+    // a watched rule's destination drive. See handleMountChange().
+
+    /// The set of volume UUIDs that were mounted at the previous mount-change tick.
+    /// Diffed against the current set to detect rising edges. Seeded in
+    /// startMonitoring() so a drive already plugged in at launch counts as
+    /// "already connected" (the launch scan handles it), NOT as a fresh edge.
+    private var lastKnownMountedUUIDs: Set<String> = []
+
+    /// Per-destination-UUID timestamp of the last connect that actually triggered a
+    /// scan. Guards against rapid unplug->replug churn (and duplicate mount signals)
+    /// re-firing the transfer: a new rising edge within `reTriggerGuardInterval` of
+    /// the previous triggered run for the same drive is swallowed.
+    private var lastConnectTriggerAt: [String: Date] = [:]
+
+    /// Wait this long after a connect edge before scanning, so the dock's mount
+    /// burst settles and the volume is fully ready. Also coalesces multiple mounts
+    /// of the same physical connection into one run.
+    private let connectSettleDelay: TimeInterval = 3
+
+    /// Ignore a fresh connect edge for the same drive within this window of its last
+    /// triggered run — an unplug->replug bounce is one physical connection = one run.
+    private let reTriggerGuardInterval: TimeInterval = 30
+
     static var manifestFileURL: URL {
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -53,17 +84,29 @@ final class FileTransferManager: ObservableObject {
     func startMonitoring() {
         guard !isMonitoring else { return }
         isMonitoring = true
+        // Seed the edge-detector with whatever is already mounted, so a backup drive
+        // that is ALREADY plugged in when OBScene launches is treated as "already
+        // connected" (the launch scan below handles it once) rather than as a fresh
+        // connect edge that would double-run.
+        lastKnownMountedUUIDs = Set(Self.mountedVolumes().map { $0.uuid })
         let center = NSWorkspace.shared.notificationCenter
+        // Both mount AND unmount funnel through handleMountChange, which diffs the
+        // mounted-volume set and fires a transfer ONLY on a NOT-connected ->
+        // connected transition of a watched rule's destination drive. This replaces
+        // the old "scan on every didMount" behavior that spammed no-op notifications.
         workspaceObservers.append(
             center.addObserver(forName: NSWorkspace.didMountNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.requestScan(reason: .driveMounted)
+                self?.handleMountChange()
             }
         )
         workspaceObservers.append(
             center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.refreshWaitingStates()
+                self?.handleMountChange()
             }
         )
+        // The periodic timer is NOT a transfer trigger for the plug-in case — it only
+        // exists so retained laptop copies become eligible for cleanup while a drive
+        // stays attached (see class doc). It never posts a no-op notification.
         timer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
             self?.requestScan(reason: .periodic)
         }
@@ -81,6 +124,63 @@ final class FileTransferManager: ObservableObject {
             center.removeObserver(observer)
         }
         workspaceObservers.removeAll()
+    }
+
+    /// Central plug-in EDGE handler. Called on EVERY volume mount AND unmount.
+    ///
+    /// The trigger is the RISING EDGE of a watched rule's destination drive:
+    /// not-connected -> connected. We compare the current mounted-UUID set against
+    /// the last-known set and only run a rule when ITS backup drive just appeared.
+    ///
+    /// Debounce / de-dupe against USB churn:
+    ///  - `connectSettleDelay` waits a few seconds after the edge before scanning so
+    ///    the dock's mount burst finishes and the volume is fully ready (also
+    ///    coalesces the burst into a single run).
+    ///  - `reTriggerGuardInterval` swallows a rapid unplug->replug (or a duplicate
+    ///    mount signal): one physical connection = at most one transfer run.
+    ///
+    /// This is what fixed the notification spam: the old code ran a full scan on
+    /// EVERY didMount (any volume), so with the backup drive already connected it
+    /// repeatedly found nothing and posted "Everything is already transferred and
+    /// verified". Now an unrelated volume mounting is NOT a rising edge for the
+    /// backup drive (it was already connected), so nothing re-fires.
+    private func handleMountChange() {
+        let currentUUIDs = Set(Self.mountedVolumes().map { $0.uuid })
+        let previousUUIDs = lastKnownMountedUUIDs
+        lastKnownMountedUUIDs = currentUUIDs
+
+        for rule in ConfigStore.shared.config.fileTransferRules where rule.isEnabled {
+            let destUUID = rule.destinationVolumeUUID
+            let wasConnected = previousUUIDs.contains(destUUID)
+            let isConnected = currentUUIDs.contains(destUUID)
+
+            if isConnected && !wasConnected {
+                // Rising edge for this rule's backup drive — the ONE moment we run.
+                let now = Date()
+                if let last = lastConnectTriggerAt[destUUID],
+                   now.timeIntervalSince(last) < reTriggerGuardInterval {
+                    // Unplug->replug bounce (or a duplicate mount signal) within the
+                    // guard window: same physical connection, so do NOT re-run.
+                    ActivityLog.shared.log(
+                        .info,
+                        "\(rule.name): backup drive reconnected within \(Int(reTriggerGuardInterval))s of the last run — skipping duplicate transfer.",
+                        userVisible: false
+                    )
+                    continue
+                }
+                lastConnectTriggerAt[destUUID] = now
+                // Settle delay: let the mount burst finish + the volume become fully
+                // ready, then scan this rule exactly once for the fresh connection.
+                DispatchQueue.main.asyncAfter(deadline: .now() + connectSettleDelay) { [weak self] in
+                    self?.requestScan(reason: .driveMounted, onlyRuleID: rule.id)
+                }
+            } else if !isConnected {
+                // Drive absent (including right after its own unmount) — reflect it.
+                updateState(ruleID: rule.id, phase: .waitingForDrive)
+            }
+            // isConnected && wasConnected: drive stayed put — deliberately do nothing
+            // so it never re-fires while it remains connected.
+        }
     }
 
     func runNow() {
@@ -367,12 +467,22 @@ final class FileTransferManager: ObservableObject {
                     "\(rule.name): \(message)",
                     userVisible: true
                 )
-            } else if reason == .driveMounted || reason == .manual {
-                UserNotifier.post(
-                    title: "OBScene: \(volume.name) is ready",
-                    body: unsettledFiles > 0
-                        ? "No finished recordings to copy yet. \(unsettledFiles) recently changed file(s) will be checked again."
-                        : "Everything is already transferred and verified."
+            } else {
+                // NO-OP run: the destination already holds every settled recording
+                // (or files are still being written). This is the COMMON case on a
+                // plug-in edge and must stay SILENT — a user notification here was the
+                // "Everything is already transferred and verified" spam Ethan hit on
+                // every USB mount event. We log it (NOT user-visible) so the activity
+                // feed still records the check, but never post a notification for a
+                // no-op. Only an ACTUAL transfer (copied/deleted, above) or a real
+                // error (catch block) notifies the user.
+                let noopDetail = unsettledFiles > 0
+                    ? "no finished recordings to copy yet (\(unsettledFiles) still being written)"
+                    : "everything already transferred and verified"
+                ActivityLog.shared.log(
+                    .fileTransferCompleted,
+                    "\(rule.name): \(noopDetail) — no changes, notification suppressed.",
+                    userVisible: false
                 )
             }
         } catch {
