@@ -33,7 +33,7 @@ struct FileTransferEngineTests {
             at: recording.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let originalData = Data("verified recording payload".utf8)
+        let originalData = Data(repeating: 0x5a, count: 5 * 1024 * 1024 + 257)
         try originalData.write(to: recording)
         let oldDate = Date(timeIntervalSinceNow: -600)
         try fileManager.setAttributes([.modificationDate: oldDate], ofItemAtPath: recording.path)
@@ -56,6 +56,16 @@ struct FileTransferEngineTests {
         let sourceHash = try engine.sha256(of: recording)
         try expect(copiedData == originalData, "destination bytes differ after verified copy")
         try expect(verified.sha256 == sourceHash, "manifest hash differs from source")
+
+        if ProcessInfo.processInfo.environment["OBSCENE_RUN_MEMORY_REGRESSION"] == "1" { // Reading 2 GiB is opt-in so normal unit tests stay fast while the real large-file path remains reproducible.
+            let largeRecording = source.appendingPathComponent("large-memory-regression.mov")
+            try expect(fileManager.createFile(atPath: largeRecording.path, contents: nil), "failed to create large sparse recording")
+            let largeHandle = try FileHandle(forWritingTo: largeRecording)
+            try largeHandle.truncate(atOffset: 2 * 1024 * 1024 * 1024)
+            try largeHandle.close()
+            let largeHash = try engine.sha256(of: largeRecording)
+            try expect(!largeHash.isEmpty, "large sparse recording did not produce a hash")
+        }
 
         let transferredAt = Date()
         let entry = FileTransferManifestEntry(

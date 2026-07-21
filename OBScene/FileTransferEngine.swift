@@ -6,6 +6,7 @@ import Foundation
 /// behavior independently testable with temporary directories.
 final class FileTransferEngine {
     static let settledFileAge: TimeInterval = 120
+    private static let chunkSize = 4 * 1024 * 1024
 
     struct Candidate: Equatable {
         let sourceURL: URL
@@ -102,7 +103,7 @@ final class FileTransferEngine {
         let output = try FileHandle(forWritingTo: temporaryURL)
         var sourceHasher = SHA256()
         do {
-            while let data = try input.read(upToCount: 4 * 1024 * 1024), !data.isEmpty {
+            try forEachChunk(in: input) { data in
                 sourceHasher.update(data: data)
                 try output.write(contentsOf: data)
             }
@@ -174,10 +175,27 @@ final class FileTransferEngine {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let data = try handle.read(upToCount: 4 * 1024 * 1024), !data.isEmpty {
+        try forEachChunk(in: handle) { data in
             hasher.update(data: data)
         }
         return Self.hexDigest(hasher.finalize())
+    }
+
+    private func forEachChunk(in handle: FileHandle,
+                              body: (Data) throws -> Void) throws {
+        while true {
+            var reachedEnd = false
+            try autoreleasepool { // Large recordings kept every FileHandle chunk alive until the full pass ended; drain temporary Data after each chunk.
+                guard let data = try handle.read(upToCount: Self.chunkSize),
+                      !data.isEmpty
+                else {
+                    reachedEnd = true
+                    return
+                }
+                try body(data)
+            }
+            if reachedEnd { return }
+        }
     }
 
     func snapshot(of url: URL) throws -> FileTransferSnapshot {

@@ -24,6 +24,16 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-21T14:21:04Z
+**Trigger:** 2026-07-21 task: investigate why the Mac commonly runs out of memory and fix OBScene without changing file-transfer behavior
+**Symptom:** macOS Jetsam snapshots caught installed OBScene 1.54.0 at about 26 GiB resident with a 31 GiB lifetime peak during automatic recording retention verification; the same process returned to 36 MiB after the pass, but system compression and swap pressure restarted other development apps.
+**Root cause:** `FileTransferEngine` read every 4 MiB `FileHandle` chunk in one long-lived autorelease scope. Large copy and SHA-256 passes therefore retained temporary Foundation `Data` backing storage until the whole pass ended. The seven-day cleanup path hashes both the laptop and backup copy, so roughly 13.8 GiB of newly eligible recordings could create about 27.6 GiB of temporary allocation, matching the captured peak.
+**Fix:** Added one shared `forEachChunk` helper in `FileTransferEngine.swift`. It keeps the existing 4 MiB streaming, hashing, atomic copy, verification, retention, and deletion behavior, but wraps each read plus its consumer in an `autoreleasepool` so temporary chunk storage is released before the next read. Both copy and standalone hash paths now use the same helper.
+**Commit:** none
+**Guard:** The normal file-transfer test now crosses the 4 MiB chunk boundary. Set `OBSCENE_RUN_MEMORY_REGRESSION=1` when running `obscene-file-transfer-tests` to hash a 2 GiB sparse recording; the release worktree passed with 36,159,488 bytes maximum RSS and 25,068,096 bytes peak footprint instead of memory growing with file size.
+---
+
+---
 **Date:** 2026-07-12T00:05:00Z
 **Trigger:** 2026-07-12 task: file-transfer keeps firing "everything is already transferred and verified" decently often
 **Symptom:** OBScene file-transfer over-triggered — repeated "Everything is already transferred and verified" notifications, without plugging in anything new.
@@ -42,4 +52,3 @@ Each entry looks like:
 **Commit:** none
 **Guard:** This LEARNINGS entry — stops future agents chasing a phantom scene-switch bug in DisplayMonitor/USBMonitor/VerifiedSetEngine.
 ---
-
