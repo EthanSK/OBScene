@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-24T12:40:29Z
+**Trigger:** 2026-07-24 task: macOS Screen Capture froze after unplugging displays and closing/reopening the MacBook lid; OBS could also wake with its profile switched but its scene collection left behind
+**Symptom:** OBS logged `Stream stopped as no capture source was not found` five seconds before Clamshell Sleep and left the `macOS Screen Capture` input stopped after wake. A prior sleep had also interrupted OBScene after the profile verified but before the scene-collection switch verified.
+**Root cause:** ScreenCaptureKit stops a built-in-display stream when the lid removes that display, and OBS does not automatically reactivate it when the display returns. The disabled Lua restarter was both broken (`FILE* expected, got string`) and only reacted to an OBS properties update; OBScene had no `NSWorkspace.didWakeNotification` reconciliation, and its WebSocket can remain connected through sleep, so reconnect-only handling cannot cover this state.
+**Fix:** Commit `df537357ba48` adds event-driven OBScene recovery after wake, display changes, settled scene selection, and WebSocket reconnect. It lists only `screen_capture` inputs and presses OBS's `reactivate_capture` property; success 100 recovers a stopped stream while healthy-state 604 is a harmless no-op. Wake also reapplies only the last automatic display profile's OBS profile/collection/scene selections, without replaying scripts or output actions.
+**Guard:** `scripts/test-macos-capture-recovery.swift` covers stopped success, healthy 604, disconnected/no-input no-ops, unexpected failure, and the bounded immediate retry schedule. The full unit suite, universal CLI build, and Xcode Release build pass. Live OBS verification proved success 100 restored changing frames and a second healthy request returned 604 without interrupting capture.
+---
+
+---
 **Date:** 2026-07-21T14:21:04Z
 **Trigger:** 2026-07-21 task: investigate why the Mac commonly runs out of memory and fix OBScene without changing file-transfer behavior
 **Symptom:** macOS Jetsam snapshots caught installed OBScene 1.54.0 at about 26 GiB resident with a 31 GiB lifetime peak during automatic recording retention verification; the same process returned to 36 MiB after the pass, but system compression and swap pressure restarted other development apps.
