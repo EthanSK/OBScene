@@ -259,8 +259,9 @@ class DisplayMonitor {
         )
 
         // Probe immediately, then once more after ScreenCaptureKit has had a
-        // bounded two-second settle window. OBS harmlessly rejects the request
-        // with 604 when the source is already healthy.
+        // bounded two-second settle window. A disabled reactivation button
+        // returns 604; the final attempt also rebuilds the stream because 604
+        // can describe either a healthy source or a black missing-display one.
         scheduleCaptureRecovery(for: .wake)
         reconcileLastDisplayProfileAfterWake()
     }

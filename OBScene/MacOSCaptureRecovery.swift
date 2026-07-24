@@ -39,11 +39,12 @@ struct MacOSCaptureRecoveryDependencies {
 
 /// Pure orchestration for recovering stopped OBS macOS Screen Capture inputs.
 ///
-/// OBS exposes `reactivate_capture` only while a ScreenCaptureKit stream is
-/// stopped. Pressing it in that state returns success (100). A healthy input
-/// rejects the press with code 604 because the property button is disabled.
-/// That makes the request a safe, OBS-gated health probe: no pixel sampling,
-/// polling loop, or OBS restart is required.
+/// OBS exposes `reactivate_capture` only while it marks a ScreenCaptureKit
+/// stream as failed. Pressing it in that state returns success (100). Code 604
+/// means only that the property button is disabled; it is the common healthy
+/// response, but OBS 32.2.0 can also return it for a black missing-display
+/// target. Wake/display recovery therefore treats 604 as a safe no-op on the
+/// immediate probe and forces one settings-driven rebuild on its final retry.
 enum MacOSCaptureRecoveryEngine {
     static let inputKind = "screen_capture"
     static let propertyName = "reactivate_capture"

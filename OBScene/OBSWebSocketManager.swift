@@ -1206,9 +1206,10 @@ class OBSWebSocketManager: ObservableObject {
     ///
     /// OBS itself gates the `reactivate_capture` property button. A stopped
     /// source returns success and starts a fresh ScreenCaptureKit stream; a
-    /// healthy source returns 604 ("property item ... is not enabled") and is
-    /// left untouched. This is intentionally safe to call after every wake,
-    /// display edge, scene-collection switch, and WebSocket reconnect.
+    /// disabled button returns 604 ("property item ... is not enabled").
+    /// Because 604 can also accompany a black missing-display target, the
+    /// caller may request one bounded settings-driven rebuild on the final
+    /// wake/display attempt.
     func reactivateStoppedMacOSScreenCaptures(
         reason: String,
         forceReinitializeWhenAlreadyHealthy: Bool = false
