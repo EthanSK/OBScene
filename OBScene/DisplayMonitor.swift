@@ -162,9 +162,12 @@ class DisplayMonitor {
             }
         }
 
-        if externalDisplayCount != previousCount {
-            scheduleCaptureRecovery(for: .displayChange)
-        }
+        // Recover on every completed display add/remove callback, even when
+        // externalDisplayCount is unchanged. Opening the lid while an external
+        // display remains connected adds the built-in display but leaves the
+        // external count at one; that is exactly when a built-in-targeted OBS
+        // source needs to be rebuilt.
+        scheduleCaptureRecovery(for: .displayChange)
     }
 
     private func updateDisplayCount() {
@@ -272,8 +275,11 @@ class DisplayMonitor {
                 guard let self, self.captureRecoveryGeneration == generation else {
                     return
                 }
+                let isFinalAttempt = attemptIndex == trigger.delays.count - 1
                 self.requestCaptureRecovery(
-                    reason: "\(trigger.label), attempt \(attemptIndex + 1)"
+                    reason: "\(trigger.label), attempt \(attemptIndex + 1)",
+                    forceReinitializeWhenAlreadyHealthy:
+                        isFinalAttempt && trigger.forceReinitializeOnFinalAttempt
                 )
             }
             captureRecoveryWorkItems.append(item)
@@ -289,10 +295,17 @@ class DisplayMonitor {
         captureRecoveryWorkItems.removeAll()
     }
 
-    private func requestCaptureRecovery(reason: String) {
+    private func requestCaptureRecovery(
+        reason: String,
+        forceReinitializeWhenAlreadyHealthy: Bool
+    ) {
         let obs = OBSWebSocketManager.shared
         if obs.isConnected {
-            obs.reactivateStoppedMacOSScreenCaptures(reason: reason)
+            obs.reactivateStoppedMacOSScreenCaptures(
+                reason: reason,
+                forceReinitializeWhenAlreadyHealthy:
+                    forceReinitializeWhenAlreadyHealthy
+            )
             return
         }
 
@@ -318,7 +331,11 @@ class DisplayMonitor {
             timeoutSeconds: 10
         ) { result in
             if case .connected = result {
-                obs.reactivateStoppedMacOSScreenCaptures(reason: reason)
+                obs.reactivateStoppedMacOSScreenCaptures(
+                    reason: reason,
+                    forceReinitializeWhenAlreadyHealthy:
+                        forceReinitializeWhenAlreadyHealthy
+                )
             }
         }
     }

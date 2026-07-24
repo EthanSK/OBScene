@@ -166,4 +166,17 @@ enum MacOSCaptureRecoveryTrigger {
         case .sceneSelectionSettled: return "scene selection"
         }
     }
+
+    /// A stopped source normally exposes `reactivate_capture`. OBS can also
+    /// load an unavailable display target as a black source while reporting
+    /// that button disabled (604). On the final wake/display attempt, force
+    /// one settings-driven stream rebuild to cover that second state.
+    var forceReinitializeOnFinalAttempt: Bool {
+        switch self {
+        case .wake, .displayChange:
+            return true
+        case .sceneSelectionSettled:
+            return false
+        }
+    }
 }

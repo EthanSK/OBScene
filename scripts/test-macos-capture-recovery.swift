@@ -171,6 +171,18 @@ private func testEventScheduleIsImmediateAndBounded() {
         MacOSCaptureRecoveryTrigger.sceneSelectionSettled.delays == [0],
         "settled scene selection probes immediately"
     )
+    expect(
+        MacOSCaptureRecoveryTrigger.wake.forceReinitializeOnFinalAttempt,
+        "wake forces one final stream rebuild when OBS reports 604"
+    )
+    expect(
+        MacOSCaptureRecoveryTrigger.displayChange.forceReinitializeOnFinalAttempt,
+        "display change forces one final stream rebuild when OBS reports 604"
+    )
+    expect(
+        !MacOSCaptureRecoveryTrigger.sceneSelectionSettled.forceReinitializeOnFinalAttempt,
+        "normal scene selection does not force a healthy stream rebuild"
+    )
 }
 
 @main
