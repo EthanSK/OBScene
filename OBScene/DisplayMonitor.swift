@@ -32,6 +32,8 @@ class DisplayMonitor {
     static let shared = DisplayMonitor()
 
     private(set) var externalDisplayCount: Int = 0
+    private var activeDisplayCount: Int = 0
+    private var builtInDisplayOnline = false
     private var isMonitoring = false
     private var wakeObserver: NSObjectProtocol?
     private var captureRecoveryWorkItems: [DispatchWorkItem] = []
@@ -179,6 +181,8 @@ class DisplayMonitor {
 
         // Subtract 1 for the built-in display
         let builtInDisplay = displays.first { CGDisplayIsBuiltin($0) != 0 }
+        activeDisplayCount = Int(displayCount)
+        builtInDisplayOnline = builtInDisplay != nil
         let externalCount = builtInDisplay != nil ? Int(displayCount) - 1 : Int(displayCount)
         externalDisplayCount = max(0, externalCount)
     }
@@ -270,6 +274,18 @@ class DisplayMonitor {
         cancelCaptureRecovery()
         captureRecoveryGeneration += 1
         let generation = captureRecoveryGeneration
+        CaptureRecoveryDiagnostics.shared.record(
+            "recovery_scheduled",
+            reason: trigger.label,
+            details: [
+                "attemptDelaysSeconds": trigger.delays
+                    .map { String($0) }
+                    .joined(separator: ","),
+                "activeDisplayCount": String(activeDisplayCount),
+                "externalDisplayCount": String(externalDisplayCount),
+                "builtInDisplayOnline": String(builtInDisplayOnline)
+            ]
+        )
 
         for (attemptIndex, delay) in trigger.delays.enumerated() {
             let item = DispatchWorkItem { [weak self] in
@@ -300,6 +316,17 @@ class DisplayMonitor {
         reason: String,
         forceReinitializeWhenAlreadyHealthy: Bool
     ) {
+        CaptureRecoveryDiagnostics.shared.record(
+            "attempt_started",
+            reason: reason,
+            details: [
+                "forceReinitializeOnDisabledButton":
+                    String(forceReinitializeWhenAlreadyHealthy),
+                "activeDisplayCount": String(activeDisplayCount),
+                "externalDisplayCount": String(externalDisplayCount),
+                "builtInDisplayOnline": String(builtInDisplayOnline)
+            ]
+        )
         let obs = OBSWebSocketManager.shared
         if obs.isConnected {
             obs.reactivateStoppedMacOSScreenCaptures(

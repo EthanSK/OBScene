@@ -69,6 +69,7 @@ xcrun swiftc \
   -parse-as-library \
   -o "$CAPTURE_RECOVERY_BIN" \
   "$ROOT/OBScene/MacOSCaptureRecovery.swift" \
+  "$ROOT/OBScene/CaptureRecoveryDiagnostics.swift" \
   "$ROOT/scripts/test-macos-capture-recovery.swift"
 echo "[test] running macOS capture recovery tests"
 "$CAPTURE_RECOVERY_BIN"

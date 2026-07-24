@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-24T13:13:49Z
+**Trigger:** Follow-up request to re-enable the disabled OBS Lua capture restarter with self-cleaning logs for future diagnosis
+**Symptom:** The old `obs-macos-capture-restarter.lua` had successfully restarted capture twice on 2026-07-22 but later threw `FILE* expected, got string`; there was no durable, focused recovery history to distinguish a missed trigger, disabled-button 604, successful reactivation, or forced rebuild.
+**Root cause:** Re-enabling the Lua would duplicate OBScene's new event-driven recovery and let two independent systems race over the same ScreenCaptureKit source. The evidence does not establish that the Lua crashed OBS: the verified OBS 32.2.0 crash in this task came from the separate `GetInputPropertiesListPropertyItems` WebSocket request.
+**Fix:** Keep the Lua disabled and record structured recovery events from the owning OBScene implementation. `CaptureRecoveryDiagnostics.swift` writes trigger topology, attempts, WebSocket result codes, reactivation outcomes, and forced-rebuild results to daily `~/Library/Logs/OBScene/capture-recovery/YYYY-MM-DD.ndjson` files. It never stores screenshots, source settings, or credentials and deletes only `.ndjson` files older than seven full days.
+**Guard:** The capture-recovery test suite proves eight-day-old diagnostics are deleted, recent and exactly-seven-day files remain, and unrelated files are untouched. The full unit suite and Xcode Release build pass. Keep the Lua file and all registrations disabled unless OBScene recovery is deliberately removed first.
+---
+
+---
 **Date:** 2026-07-24T12:40:29Z
 **Trigger:** 2026-07-24 task: macOS Screen Capture froze after unplugging displays and closing/reopening the MacBook lid; OBS could also wake with its profile switched but its scene collection left behind
 **Symptom:** OBS logged `Stream stopped as no capture source was not found` five seconds before Clamshell Sleep and left the `macOS Screen Capture` input stopped after wake. A prior sleep had also interrupted OBScene after the profile verified but before the scene-collection switch verified.

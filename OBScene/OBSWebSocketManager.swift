@@ -1246,6 +1246,12 @@ class OBSWebSocketManager: ObservableObject {
         MacOSCaptureRecoveryEngine.run(dependencies: dependencies) { [weak self] result in
             switch result {
             case .notConnected:
+                CaptureRecoveryDiagnostics.shared.record(
+                    "attempt_skipped",
+                    reason: reason,
+                    success: false,
+                    details: ["cause": "websocket_disconnected"]
+                )
                 ActivityLog.shared.log(
                     .info,
                     "macOS capture recovery skipped: OBS WebSocket is disconnected (\(reason))"
@@ -1254,11 +1260,23 @@ class OBSWebSocketManager: ObservableObject {
                 let detail = [code.map(String.init), comment]
                     .compactMap { $0 }
                     .joined(separator: ": ")
+                CaptureRecoveryDiagnostics.shared.record(
+                    "input_list_failed",
+                    reason: reason,
+                    responseCode: code,
+                    success: false,
+                    details: comment.map { ["comment": $0] } ?? [:]
+                )
                 ActivityLog.shared.log(
                     .info,
                     "Could not list macOS capture sources\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
                 )
             case .noInputs:
+                CaptureRecoveryDiagnostics.shared.record(
+                    "no_screen_capture_inputs",
+                    reason: reason,
+                    success: true
+                )
                 ActivityLog.shared.log(
                     .info,
                     "No macOS Screen Capture inputs found (\(reason))"
@@ -1267,12 +1285,31 @@ class OBSWebSocketManager: ObservableObject {
                 for entry in entries {
                     switch entry.outcome {
                     case .reactivated:
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reactivated",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode: 100,
+                            success: true
+                        )
                         ActivityLog.shared.log(
                             .info,
                             "Recovered stopped macOS capture '\(entry.inputName)' (\(reason))",
                             userVisible: true
                         )
                     case .alreadyHealthy:
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "reactivation_button_disabled",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode:
+                                MacOSCaptureRecoveryEngine.alreadyHealthyCode,
+                            success: true,
+                            details: [
+                                "forcingReinitialize":
+                                    String(forceReinitializeWhenAlreadyHealthy)
+                            ]
+                        )
                         if forceReinitializeWhenAlreadyHealthy {
                             self?.forceReinitializeMacOSScreenCapture(
                                 inputName: entry.inputName,
@@ -1288,6 +1325,14 @@ class OBSWebSocketManager: ObservableObject {
                         let detail = [code.map(String.init), comment]
                             .compactMap { $0 }
                             .joined(separator: ": ")
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reactivation_failed",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode: code,
+                            success: false,
+                            details: comment.map { ["comment": $0] } ?? [:]
+                        )
                         ActivityLog.shared.log(
                             .info,
                             "Could not reactivate macOS capture '\(entry.inputName)'\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
@@ -1320,6 +1365,13 @@ class OBSWebSocketManager: ObservableObject {
                   response.result,
                   let data = response.responseData as? [String: Any],
                   let settings = data["inputSettings"] as? [String: Any] else {
+                CaptureRecoveryDiagnostics.shared.record(
+                    "reinitialize_settings_read_failed",
+                    reason: reason,
+                    inputName: inputName,
+                    responseCode: response?.code,
+                    success: false
+                )
                 ActivityLog.shared.log(
                     .info,
                     "Could not read macOS capture settings for '\(inputName)' (\(reason))"
@@ -1354,6 +1406,19 @@ class OBSWebSocketManager: ObservableObject {
                 ) { restoreResponse in
                     if toggleResponse?.result == true
                         && restoreResponse?.result == true {
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reinitialized",
+                            reason: reason,
+                            inputName: inputName,
+                            responseCode: restoreResponse?.code,
+                            success: true,
+                            details: [
+                                "cursorPreferenceRestored": "true",
+                                "toggleResponseCode":
+                                    toggleResponse.map { String($0.code) }
+                                    ?? "timeout"
+                            ]
+                        )
                         ActivityLog.shared.log(
                             .info,
                             "Reinitialized macOS capture '\(inputName)' (\(reason))"
@@ -1363,6 +1428,18 @@ class OBSWebSocketManager: ObservableObject {
                             .map { String($0.code) } ?? "timeout"
                         let restoreCode = restoreResponse
                             .map { String($0.code) } ?? "timeout"
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reinitialize_failed",
+                            reason: reason,
+                            inputName: inputName,
+                            responseCode: restoreResponse?.code,
+                            success: false,
+                            details: [
+                                "cursorPreferenceRestoreRequested": "true",
+                                "toggleResponseCode": toggleCode,
+                                "restoreResponseCode": restoreCode
+                            ]
+                        )
                         ActivityLog.shared.log(
                             .info,
                             "Could not fully reinitialize macOS capture '\(inputName)' (toggle \(toggleCode), restore \(restoreCode)) — \(reason)"

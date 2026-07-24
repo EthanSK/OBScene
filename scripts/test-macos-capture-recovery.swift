@@ -69,8 +69,8 @@ private func testStoppedCaptureReactivates() {
     )
 }
 
-private func testHealthyCaptureIsNoOp() {
-    currentTest = "healthyCaptureIsNoOp"
+private func testDisabledButtonIsNoOp() {
+    currentTest = "disabledButtonIsNoOp"
     var result: MacOSCaptureRecoveryRunResult?
     let dependencies = MacOSCaptureRecoveryDependencies(
         isConnected: { true },
@@ -91,7 +91,7 @@ private func testHealthyCaptureIsNoOp() {
         result == .completed([
             MacOSCaptureRecoveryEntry(inputName: "Display", outcome: .alreadyHealthy)
         ]),
-        "OBS 604 is a healthy no-op"
+        "OBS 604 is classified as a disabled-button no-op"
     )
 }
 
@@ -181,22 +181,89 @@ private func testEventScheduleIsImmediateAndBounded() {
     )
     expect(
         !MacOSCaptureRecoveryTrigger.sceneSelectionSettled.forceReinitializeOnFinalAttempt,
-        "normal scene selection does not force a healthy stream rebuild"
+        "normal scene selection does not force a disabled-button rebuild"
     )
+}
+
+private func testDiagnosticsDeleteOnlyExpiredNDJSON() {
+    currentTest = "diagnosticsDeleteOnlyExpiredNDJSON"
+    let fileManager = FileManager.default
+    let directory = fileManager.temporaryDirectory.appendingPathComponent(
+        "obscene-capture-recovery-tests-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    do {
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let expired = directory.appendingPathComponent("expired.ndjson")
+        let recent = directory.appendingPathComponent("recent.ndjson")
+        let boundary = directory.appendingPathComponent("boundary.ndjson")
+        let unrelated = directory.appendingPathComponent("keep.txt")
+        for file in [expired, recent, boundary, unrelated] {
+            fileManager.createFile(atPath: file.path, contents: Data())
+        }
+        try fileManager.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-8 * 24 * 60 * 60)],
+            ofItemAtPath: expired.path
+        )
+        try fileManager.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-6 * 24 * 60 * 60)],
+            ofItemAtPath: recent.path
+        )
+        try fileManager.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-7 * 24 * 60 * 60)],
+            ofItemAtPath: boundary.path
+        )
+        try fileManager.setAttributes(
+            [.modificationDate: now.addingTimeInterval(-30 * 24 * 60 * 60)],
+            ofItemAtPath: unrelated.path
+        )
+
+        try CaptureRecoveryDiagnostics.removeExpiredLogs(
+            in: directory,
+            now: now,
+            fileManager: fileManager
+        )
+
+        expect(
+            !fileManager.fileExists(atPath: expired.path),
+            "NDJSON older than seven days is removed"
+        )
+        expect(
+            fileManager.fileExists(atPath: recent.path),
+            "recent NDJSON is retained"
+        )
+        expect(
+            fileManager.fileExists(atPath: boundary.path),
+            "exactly seven-day-old NDJSON is retained"
+        )
+        expect(
+            fileManager.fileExists(atPath: unrelated.path),
+            "unrelated files are never removed"
+        )
+    } catch {
+        expect(false, "diagnostics cleanup threw \(error)")
+    }
 }
 
 @main
 struct MacOSCaptureRecoveryTests {
     static func main() {
         testStoppedCaptureReactivates()
-        testHealthyCaptureIsNoOp()
+        testDisabledButtonIsNoOp()
         testDisconnectedStopsBeforeListing()
         testNoCaptureInputsIsNoOp()
         testUnexpectedFailureIsPreserved()
         testEventScheduleIsImmediateAndBounded()
+        testDiagnosticsDeleteOnlyExpiredNDJSON()
 
         if failures.isEmpty {
-            print("MacOSCaptureRecovery tests passed (6 tests)")
+            print("MacOSCaptureRecovery tests passed (7 tests)")
         } else {
             print("\(failures.count) MacOSCaptureRecovery test failure(s)")
             exit(1)
