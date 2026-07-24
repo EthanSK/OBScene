@@ -882,6 +882,31 @@ class DisplayMonitor {
     /// list has been rebuilt yet.
     private static let collectionSettleDelay:    TimeInterval = 0.5  // 500ms
 
+    /// Restore only missing Custom Browser Docks after the verified OBS
+    /// profile/collection/scene pipeline has settled. Keeping this separate
+    /// from `runScript` makes the automation visible and independently
+    /// configurable in Settings instead of hiding it inside profile commands.
+    ///
+    /// The standalone helper is intentionally one-shot and visibility-only:
+    /// it checks "set channels" and "chat" through the closed Docks menu,
+    /// presses each hidden item at most once, and skips overlapping runs.
+    private func restoreMissingCustomBrowserDocksIfEnabled(
+        for profile: TriggerProfile
+    ) {
+        guard ConfigStore.shared.config
+            .restoreMissingCustomBrowserDocksAfterProfileChanges else {
+            return
+        }
+        ActivityLog.shared.log(
+            .info,
+            "Restoring missing Custom Browser Docks (\(profile.name))"
+        )
+        ScriptRunner.run(
+            script: "restore-obs-browser-docks",
+            profileName: "\(profile.name) — Custom Browser Docks"
+        )
+    }
+
     private func runTriggerActions(for profile: TriggerProfile, isSimulated: Bool = false) {
         let obs = OBSWebSocketManager.shared
 
@@ -1073,6 +1098,7 @@ class DisplayMonitor {
         runProfile {
             runSceneCollection {
                 runScene {
+                    self.restoreMissingCustomBrowserDocksIfEnabled(for: profile)
                     runConfiguredActions()
                     if !profile.selectedSceneCollection.isEmpty
                         || !profile.selectedScene.isEmpty {

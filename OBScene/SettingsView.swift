@@ -960,6 +960,29 @@ struct SettingsView: View {
                     }
                     .controlSize(.small)
                 }
+
+                Divider()
+
+                Toggle(
+                    "Restore missing Custom Browser Docks after profile changes",
+                    isOn: $configStore.config
+                        .restoreMissingCustomBrowserDocksAfterProfileChanges
+                )
+                Text("Makes the existing “set channels” and “chat” docks visible after OBS profile, scene collection, and scene switching settles. This restores visibility only; it does not reload dock page content or open the Docks menu.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text("Dock diagnostics are retained for 7 days.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer(minLength: 8)
+                    Button("Open Dock Logs") {
+                        openDockRestorationLogs()
+                    }
+                    .controlSize(.small)
+                }
             }
             .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1148,6 +1171,25 @@ struct SettingsView: View {
 
     private func openCaptureRecoveryLogs() {
         let directoryURL = CaptureRecoveryDiagnostics.logDirectoryURL
+        try? FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        if !NSWorkspace.shared.open(directoryURL) {
+            NSWorkspace.shared.activateFileViewerSelecting([directoryURL])
+        }
+    }
+
+    private func openDockRestorationLogs() {
+        let directoryURL = FileManager.default.urls(
+            for: .libraryDirectory,
+            in: .userDomainMask
+        )[0]
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent(
+                "restore-obs-browser-docks",
+                isDirectory: true
+            )
         try? FileManager.default.createDirectory(
             at: directoryURL,
             withIntermediateDirectories: true

@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-24T13:51:18Z
+**Trigger:** Follow-up request to restore the previously disabled Custom Browser Dock behavior without hiding it in profile scripts
+**Symptom:** The safe standalone `restore-obs-browser-docks` helper still existed at its reversible disabled path, but every OBScene profile command was clean and there was no visible way to opt back into dock restoration.
+**Root cause:** The old integration appended `&& restore-obs-browser-docks` to profile `runScript` strings before the verified OBS selection pipeline. That made the Accessibility side effect hard to discover and could invoke it while OBS was still launching or restarting.
+**Fix:** Add the persisted **Restore missing Custom Browser Docks after profile changes** setting under Wake & Display Recovery. When enabled, OBScene invokes the existing one-shot helper only after its connected profile/scene-collection/scene pipeline settles. The UI names the exact `set channels` and `chat` targets, states that the behavior restores visibility rather than page content, and opens the seven-day dock diagnostics. Keep legacy profile commands free of dock suffixes.
+**Guard:** AppConfig tests prove the setting defaults off for upgrades and an explicit enabled value decodes and round-trips. The standalone helper passes Bash 3.2 syntax, embedded AppleScript compilation, fake one-shot execution, overlap-skip/lock-release, structured-log, and retention tests; the personal dock skill validates. The full OBScene unit suite, Release build, and offscreen Settings render pass.
+---
+
+---
 **Date:** 2026-07-24T13:36:26Z
 **Trigger:** Follow-up objection that OBScene's new wake/display capture recovery must not be hidden behavior
 **Symptom:** Automatic ScreenCaptureKit repair and wake-time OBS selection reconciliation were enabled globally but had no visible control or explanation in OBScene.
