@@ -272,6 +272,10 @@ class DisplayMonitor {
 
     private func scheduleCaptureRecovery(for trigger: MacOSCaptureRecoveryTrigger) {
         cancelCaptureRecovery()
+        guard ConfigStore.shared.config
+            .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            return
+        }
         captureRecoveryGeneration += 1
         let generation = captureRecoveryGeneration
         CaptureRecoveryDiagnostics.shared.record(
@@ -290,6 +294,10 @@ class DisplayMonitor {
         for (attemptIndex, delay) in trigger.delays.enumerated() {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.captureRecoveryGeneration == generation else {
+                    return
+                }
+                guard ConfigStore.shared.config
+                    .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
                     return
                 }
                 let isFinalAttempt = attemptIndex == trigger.delays.count - 1
@@ -375,6 +383,10 @@ class DisplayMonitor {
     /// slept before the scene-collection verification completed, and wake
     /// otherwise left OBS permanently half-switched.
     private func reconcileLastDisplayProfileAfterWake() {
+        guard ConfigStore.shared.config
+            .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            return
+        }
         guard let profileID = lastAutomaticDisplayProfileID else {
             return
         }

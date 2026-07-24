@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-24T13:36:26Z
+**Trigger:** Follow-up objection that OBScene's new wake/display capture recovery must not be hidden behavior
+**Symptom:** Automatic ScreenCaptureKit repair and wake-time OBS selection reconciliation were enabled globally but had no visible control or explanation in OBScene.
+**Root cause:** The recovery was implemented as internal event handling rather than as a persisted user-facing preference.
+**Fix:** Add a dedicated Settings → Wake & Display Recovery group. Its enabled-by-default toggle gates display-change recovery, wake recovery, wake-time profile/scene reconciliation, and WebSocket-reconnect recovery; turning it off does not disable normal configured display profiles. The group states the bounded 0/1-second display and 0/2-second wake schedule and opens the seven-day diagnostics directory.
+**Guard:** AppConfig tests prove legacy configs default to enabled and an explicit disabled value decodes and round-trips. Every delayed recovery attempt checks the current setting again, so disabling it while a retry is pending suppresses that retry. The full unit suite, Release build, and offscreen Settings render pass.
+---
+
+---
 **Date:** 2026-07-24T13:13:49Z
 **Trigger:** Follow-up request to re-enable the disabled OBS Lua capture restarter with self-cleaning logs for future diagnosis
 **Symptom:** The old `obs-macos-capture-restarter.lua` had successfully restarted capture twice on 2026-07-22 but later threw `FILE* expected, got string`; there was no durable, focused recovery history to distinguish a missed trigger, disabled-button 604, successful reactivation, or forced rebuild.

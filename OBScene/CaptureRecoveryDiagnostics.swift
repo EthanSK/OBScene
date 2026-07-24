@@ -9,6 +9,12 @@ import Foundation
 final class CaptureRecoveryDiagnostics {
     static let shared = CaptureRecoveryDiagnostics()
     static let retentionInterval: TimeInterval = 7 * 24 * 60 * 60
+    static var logDirectoryURL: URL {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("OBScene", isDirectory: true)
+            .appendingPathComponent("capture-recovery", isDirectory: true)
+    }
 
     struct Event: Encodable {
         let timestamp: String
@@ -46,11 +52,7 @@ final class CaptureRecoveryDiagnostics {
         directoryURL: URL? = nil
     ) {
         self.fileManager = fileManager
-        self.directoryURL = directoryURL
-            ?? fileManager.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("Logs", isDirectory: true)
-                .appendingPathComponent("OBScene", isDirectory: true)
-                .appendingPathComponent("capture-recovery", isDirectory: true)
+        self.directoryURL = directoryURL ?? Self.logDirectoryURL
     }
 
     func record(

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # run-tests.sh — compile + run OBScene unit tests.
 #
-# Runs FOUR unit-test binaries sequentially:
+# Runs FIVE unit-test binaries sequentially:
 #   1. VerifiedSetEngine retry/verify state machine (2026-04-18 bug fix).
 #   2. SafeModeDialogDismisser decision logic (2026-04-18 Safe Mode auto-
 #      dismissal feature — v1.26).
 #   3. File-transfer copy/hash/retention destructive gate.
 #   4. macOS Screen Capture wake/display recovery policy.
+#   5. AppConfig forward-compatible settings decoding.
 #
 # Each binary is produced with `swiftc -parse-as-library` and has its own
 # `@main` entrypoint, so they must be compiled separately.
@@ -73,3 +74,15 @@ xcrun swiftc \
   "$ROOT/scripts/test-macos-capture-recovery.swift"
 echo "[test] running macOS capture recovery tests"
 "$CAPTURE_RECOVERY_BIN"
+
+# --- 5. AppConfig --------------------------------------------------------
+APP_CONFIG_BIN="$BUILD_DIR/obscene-app-config-tests"
+echo "[test] compiling AppConfig tests -> $APP_CONFIG_BIN"
+xcrun swiftc \
+  -parse-as-library \
+  -o "$APP_CONFIG_BIN" \
+  "$ROOT/OBScene/FileTransferModels.swift" \
+  "$ROOT/OBScene/ConfigStore.swift" \
+  "$ROOT/scripts/test-app-config.swift"
+echo "[test] running AppConfig tests"
+"$APP_CONFIG_BIN"

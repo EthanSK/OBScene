@@ -239,6 +239,7 @@ struct SettingsView: View {
                 }
 
                 obsConnectionGroup
+                recoveryGroup
                 profilesSection
 
                 Spacer(minLength: 0)
@@ -276,6 +277,7 @@ struct SettingsView: View {
                 updatesGroup
                 generalGroup
                 obsConnectionGroup
+                recoveryGroup
                 profilesSection
                 testingGroup
                 activitySection
@@ -930,6 +932,40 @@ struct SettingsView: View {
         }
     }
 
+    private var recoveryGroup: some View {
+        GroupBox(
+            label: Label(
+                "Wake & Display Recovery",
+                systemImage: "arrow.clockwise.circle"
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 7) {
+                Toggle(
+                    "Automatically recover OBS after wake/display changes",
+                    isOn: $configStore.config
+                        .automaticallyRecoverOBSAfterWakeAndDisplayChanges
+                )
+                Text("Repairs frozen macOS Screen Capture sources immediately and once more after 1 second for a display change or 2 seconds after wake. Also finishes profile, scene collection, and scene selections interrupted by sleep.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text("Recovery diagnostics are retained for 7 days.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer(minLength: 8)
+                    Button("Open Recovery Logs") {
+                        openCaptureRecoveryLogs()
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private var obsConnectionGroup: some View {
         GroupBox(label: Label("OBS WebSocket Connection", systemImage: "network")) {
             VStack(alignment: .leading, spacing: 8) {
@@ -1107,6 +1143,17 @@ struct SettingsView: View {
         )
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+    }
+
+    private func openCaptureRecoveryLogs() {
+        let directoryURL = CaptureRecoveryDiagnostics.logDirectoryURL
+        try? FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        if !NSWorkspace.shared.open(directoryURL) {
+            NSWorkspace.shared.activateFileViewerSelecting([directoryURL])
         }
     }
 

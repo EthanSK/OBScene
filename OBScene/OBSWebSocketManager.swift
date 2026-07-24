@@ -493,6 +493,10 @@ class OBSWebSocketManager: ObservableObject {
         // connected through sleep), but it is a useful additional bounded
         // opportunity to recover a stopped ScreenCaptureKit stream.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard ConfigStore.shared.config
+                .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+                return
+            }
             self?.reactivateStoppedMacOSScreenCaptures(reason: "WebSocket connected")
         }
     }

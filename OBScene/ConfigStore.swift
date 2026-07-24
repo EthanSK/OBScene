@@ -648,6 +648,14 @@ struct AppConfig: Codable, Equatable {
     var autoLaunchOBS: Bool = true
     var obsLaunchTimeoutSeconds: Int = 30
 
+    /// Recover macOS Screen Capture streams and reconcile interrupted OBS
+    /// profile/scene selections after display changes or system wake.
+    ///
+    /// Defaults to true so the recovery remains active for existing installs,
+    /// but it is explicitly surfaced in Settings → Wake & Display Recovery and can be changed
+    /// without relaunching OBScene.
+    var automaticallyRecoverOBSAfterWakeAndDisplayChanges: Bool = true
+
     /// Independent automatic recording-transfer setups. Keeping these at the
     /// app level (rather than inside OBS trigger profiles) lets a transfer run
     /// whenever its physical destination volume appears, even if OBS is not
@@ -718,6 +726,10 @@ struct AppConfig: Codable, Equatable {
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
         autoLaunchOBS = try container.decodeIfPresent(Bool.self, forKey: .autoLaunchOBS) ?? autoLaunchOBS
         obsLaunchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .obsLaunchTimeoutSeconds) ?? obsLaunchTimeoutSeconds
+        automaticallyRecoverOBSAfterWakeAndDisplayChanges = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticallyRecoverOBSAfterWakeAndDisplayChanges
+        ) ?? automaticallyRecoverOBSAfterWakeAndDisplayChanges
         fileTransferRules = try container.decodeIfPresent([FileTransferRule].self, forKey: .fileTransferRules) ?? fileTransferRules
         profiles = try container.decodeIfPresent([TriggerProfile].self, forKey: .profiles) ?? profiles
         selectedProfileIndex = try container.decodeIfPresent(Int.self, forKey: .selectedProfileIndex) ?? selectedProfileIndex
