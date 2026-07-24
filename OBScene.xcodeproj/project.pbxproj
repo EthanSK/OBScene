@@ -26,6 +26,8 @@
 		A10000190000000000000190 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000019000000000000019A /* FileTransferEngine.swift */; };
 		A100001A00000000000001A0 /* FileTransferManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001A00000000000001AA /* FileTransferManager.swift */; };
 		A100001B00000000000001B0 /* FileTransferSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001B00000000000001BA /* FileTransferSettingsView.swift */; };
+		A100001C00000000000001C0 /* MacOSCaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001C00000000000001CA /* MacOSCaptureRecovery.swift */; };
+		A100001D00000000000001D0 /* CaptureRecoveryDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */; };
 		A10000150000000000000150 /* Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; };
 		A10000160000000000000160 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -53,6 +55,8 @@
 		A2000019000000000000019A /* FileTransferEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferEngine.swift; sourceTree = "<group>"; };
 		A200001A00000000000001AA /* FileTransferManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferManager.swift; sourceTree = "<group>"; };
 		A200001B00000000000001BA /* FileTransferSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferSettingsView.swift; sourceTree = "<group>"; };
+		A200001C00000000000001CA /* MacOSCaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSCaptureRecovery.swift; sourceTree = "<group>"; };
+		A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRecoveryDiagnostics.swift; sourceTree = "<group>"; };
 		A30000010000000000000001 /* OBScene.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OBScene.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -113,6 +117,8 @@
 				A2000019000000000000019A /* FileTransferEngine.swift */,
 				A200001A00000000000001AA /* FileTransferManager.swift */,
 				A200001B00000000000001BA /* FileTransferSettingsView.swift */,
+				A200001C00000000000001CA /* MacOSCaptureRecovery.swift */,
+				A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */,
 				A20000070000000000000007 /* Info.plist */,
 				A20000080000000000000008 /* OBScene.entitlements */,
 			);
@@ -204,6 +210,8 @@
 				A10000190000000000000190 /* FileTransferEngine.swift in Sources */,
 				A100001A00000000000001A0 /* FileTransferManager.swift in Sources */,
 				A100001B00000000000001B0 /* FileTransferSettingsView.swift in Sources */,
+				A100001C00000000000001C0 /* MacOSCaptureRecovery.swift in Sources */,
+				A100001D00000000000001D0 /* CaptureRecoveryDiagnostics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import AppKit
 
 extension Notification.Name {
     static let displayTriggerFired = Notification.Name("displayTriggerFired")
@@ -31,7 +32,13 @@ class DisplayMonitor {
     static let shared = DisplayMonitor()
 
     private(set) var externalDisplayCount: Int = 0
+    private var activeDisplayCount: Int = 0
+    private var builtInDisplayOnline = false
     private var isMonitoring = false
+    private var wakeObserver: NSObjectProtocol?
+    private var captureRecoveryWorkItems: [DispatchWorkItem] = []
+    private var captureRecoveryGeneration = 0
+    private var lastAutomaticDisplayProfileID: UUID?
 
     /// Per-profile pending trigger work items, keyed by profile ID.
     private var triggerWorkItems: [UUID: DispatchWorkItem] = [:]
@@ -61,6 +68,14 @@ class DisplayMonitor {
         // would only be released by an explicit unregister.
         let context = Unmanaged.passUnretained(self).toOpaque()
         CGDisplayRegisterReconfigurationCallback(displayReconfigurationCallback, context)
+
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleWake()
+        }
     }
 
     func stopMonitoring() {
@@ -70,6 +85,12 @@ class DisplayMonitor {
         // Pass the SAME function pointer we registered with so the runtime can
         // actually find and remove the registration.
         CGDisplayRemoveReconfigurationCallback(displayReconfigurationCallback, context)
+
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
+        cancelCaptureRecovery()
     }
 
     fileprivate func handleDisplayChange() {
@@ -142,6 +163,13 @@ class DisplayMonitor {
                 }
             }
         }
+
+        // Recover on every completed display add/remove callback, even when
+        // externalDisplayCount is unchanged. Opening the lid while an external
+        // display remains connected adds the built-in display but leaves the
+        // external count at one; that is exactly when a built-in-targeted OBS
+        // source needs to be rebuilt.
+        scheduleCaptureRecovery(for: .displayChange)
     }
 
     private func updateDisplayCount() {
@@ -153,6 +181,8 @@ class DisplayMonitor {
 
         // Subtract 1 for the built-in display
         let builtInDisplay = displays.first { CGDisplayIsBuiltin($0) != 0 }
+        activeDisplayCount = Int(displayCount)
+        builtInDisplayOnline = builtInDisplay != nil
         let externalCount = builtInDisplay != nil ? Int(displayCount) - 1 : Int(displayCount)
         externalDisplayCount = max(0, externalCount)
     }
@@ -222,6 +252,245 @@ class DisplayMonitor {
             for item in items { item.cancel() }
         }
         inFlightActionWorkItems.removeAll()
+    }
+
+    private func handleWake() {
+        updateDisplayCount()
+        NotificationCenter.default.post(name: .externalDisplayCountChanged, object: nil)
+        ActivityLog.shared.log(
+            .info,
+            "Mac woke with \(externalDisplayCount) external display(s); reconciling OBS state"
+        )
+
+        // Probe immediately, then once more after ScreenCaptureKit has had a
+        // bounded two-second settle window. A disabled reactivation button
+        // returns 604; the final attempt also rebuilds the stream because 604
+        // can describe either a healthy source or a black missing-display one.
+        scheduleCaptureRecovery(for: .wake)
+        reconcileLastDisplayProfileAfterWake()
+    }
+
+    private func scheduleCaptureRecovery(for trigger: MacOSCaptureRecoveryTrigger) {
+        cancelCaptureRecovery()
+        guard ConfigStore.shared.config
+            .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            return
+        }
+        captureRecoveryGeneration += 1
+        let generation = captureRecoveryGeneration
+        CaptureRecoveryDiagnostics.shared.record(
+            "recovery_scheduled",
+            reason: trigger.label,
+            details: [
+                "attemptDelaysSeconds": trigger.delays
+                    .map { String($0) }
+                    .joined(separator: ","),
+                "activeDisplayCount": String(activeDisplayCount),
+                "externalDisplayCount": String(externalDisplayCount),
+                "builtInDisplayOnline": String(builtInDisplayOnline)
+            ]
+        )
+
+        for (attemptIndex, delay) in trigger.delays.enumerated() {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.captureRecoveryGeneration == generation else {
+                    return
+                }
+                guard ConfigStore.shared.config
+                    .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+                    return
+                }
+                let isFinalAttempt = attemptIndex == trigger.delays.count - 1
+                self.requestCaptureRecovery(
+                    reason: "\(trigger.label), attempt \(attemptIndex + 1)",
+                    forceReinitializeWhenAlreadyHealthy:
+                        isFinalAttempt && trigger.forceReinitializeOnFinalAttempt
+                )
+            }
+            captureRecoveryWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    private func cancelCaptureRecovery() {
+        captureRecoveryGeneration += 1
+        for item in captureRecoveryWorkItems {
+            item.cancel()
+        }
+        captureRecoveryWorkItems.removeAll()
+    }
+
+    private func requestCaptureRecovery(
+        reason: String,
+        forceReinitializeWhenAlreadyHealthy: Bool
+    ) {
+        CaptureRecoveryDiagnostics.shared.record(
+            "attempt_started",
+            reason: reason,
+            details: [
+                "forceReinitializeOnDisabledButton":
+                    String(forceReinitializeWhenAlreadyHealthy),
+                "activeDisplayCount": String(activeDisplayCount),
+                "externalDisplayCount": String(externalDisplayCount),
+                "builtInDisplayOnline": String(builtInDisplayOnline)
+            ]
+        )
+        let obs = OBSWebSocketManager.shared
+        if obs.isConnected {
+            obs.reactivateStoppedMacOSScreenCaptures(
+                reason: reason,
+                forceReinitializeWhenAlreadyHealthy:
+                    forceReinitializeWhenAlreadyHealthy
+            )
+            return
+        }
+
+        // Recovery should never launch OBS merely because the Mac woke. If OBS
+        // is already running but its socket bounced, reconnect to that process
+        // and then perform the same safe probe.
+        let config = ConfigStore.shared.config
+        guard obs.isOBSRunning(),
+              config.hasBeenConfigured,
+              !config.obsHost.isEmpty else {
+            ActivityLog.shared.log(
+                .info,
+                "macOS capture recovery skipped: OBS is not running or configured (\(reason))"
+            )
+            return
+        }
+
+        _ = obs.ensureConnected(
+            host: config.obsHost,
+            port: config.obsPort,
+            password: config.obsPassword,
+            autoLaunch: false,
+            timeoutSeconds: 10
+        ) { result in
+            if case .connected = result {
+                obs.reactivateStoppedMacOSScreenCaptures(
+                    reason: reason,
+                    forceReinitializeWhenAlreadyHealthy:
+                        forceReinitializeWhenAlreadyHealthy
+                )
+            }
+        }
+    }
+
+    /// Reapply only the OBS selections from the display profile that was
+    /// active when this OBScene process went to sleep. Scripts and output
+    /// actions are deliberately not replayed. This repairs the specific
+    /// interrupted state where OBS acknowledged the profile switch, macOS
+    /// slept before the scene-collection verification completed, and wake
+    /// otherwise left OBS permanently half-switched.
+    private func reconcileLastDisplayProfileAfterWake() {
+        guard ConfigStore.shared.config
+            .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            return
+        }
+        guard let profileID = lastAutomaticDisplayProfileID else {
+            return
+        }
+        let profiles = ConfigStore.shared.config.profiles
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              profile.isEnabled,
+              profile.triggerType == TriggerProfile.TriggerType.display else {
+            return
+        }
+
+        let conditionStillMatches: Bool
+        switch profile.mode {
+        case .plugIn:
+            conditionStillMatches = externalDisplayCount >= profile.requiredExternalDisplays
+        case .plugOut:
+            conditionStillMatches = externalDisplayCount < profile.requiredExternalDisplays
+        }
+        guard conditionStillMatches else {
+            ActivityLog.shared.log(
+                .info,
+                "Wake reconciliation skipped: display condition no longer matches '\(profile.name)'"
+            )
+            return
+        }
+
+        let obs = OBSWebSocketManager.shared
+        let run = { [weak self] in
+            self?.reconcileOBSSelections(for: profile)
+        }
+        if obs.isConnected {
+            run()
+            return
+        }
+
+        let config = ConfigStore.shared.config
+        guard obs.isOBSRunning(),
+              config.hasBeenConfigured,
+              !config.obsHost.isEmpty else {
+            return
+        }
+        _ = obs.ensureConnected(
+            host: config.obsHost,
+            port: config.obsPort,
+            password: config.obsPassword,
+            autoLaunch: false,
+            timeoutSeconds: 10
+        ) { result in
+            if case .connected = result {
+                run()
+            }
+        }
+    }
+
+    private func reconcileOBSSelections(for profile: TriggerProfile) {
+        let obs = OBSWebSocketManager.shared
+        ActivityLog.shared.log(
+            .info,
+            "Wake reconciliation started for '\(profile.name)'"
+        )
+
+        func runProfile(then next: @escaping () -> Void) {
+            guard !profile.selectedProfile.isEmpty else {
+                next()
+                return
+            }
+            obs.setProfileAndVerify(profile.selectedProfile) { _ in next() }
+        }
+
+        func runSceneCollection(then next: @escaping () -> Void) {
+            guard !profile.selectedSceneCollection.isEmpty else {
+                next()
+                return
+            }
+            obs.setSceneCollectionAndVerify(profile.selectedSceneCollection) { _ in
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + Self.collectionSettleDelay,
+                    execute: next
+                )
+            }
+        }
+
+        func runScene(then next: @escaping () -> Void) {
+            guard !profile.selectedScene.isEmpty else {
+                next()
+                return
+            }
+            obs.setScene(profile.selectedScene)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.sceneToActionsDelay,
+                execute: next
+            )
+        }
+
+        runProfile {
+            runSceneCollection {
+                runScene { [weak self] in
+                    ActivityLog.shared.log(
+                        .info,
+                        "Wake reconciliation finished for '\(profile.name)'"
+                    )
+                    self?.scheduleCaptureRecovery(for: .sceneSelectionSettled)
+                }
+            }
+        }
     }
 
     /// Cancel any still-pending staggered action dispatches for a profile.
@@ -330,6 +599,9 @@ class DisplayMonitor {
         if !isSimulated && !profile.isEnabled {
             print("[OBScene] Trigger fired but profile is disabled")
             return
+        }
+        if !isSimulated && profile.triggerType == .display {
+            lastAutomaticDisplayProfileID = profile.id
         }
 
         // Fire the per-profile "Run on activate" shell hook FIRST, before any
@@ -610,6 +882,31 @@ class DisplayMonitor {
     /// list has been rebuilt yet.
     private static let collectionSettleDelay:    TimeInterval = 0.5  // 500ms
 
+    /// Restore only missing Custom Browser Docks after the verified OBS
+    /// profile/collection/scene pipeline has settled. Keeping this separate
+    /// from `runScript` makes the automation visible and independently
+    /// configurable in Settings instead of hiding it inside profile commands.
+    ///
+    /// The standalone helper is intentionally one-shot and visibility-only:
+    /// it checks "set channels" and "chat" through the closed Docks menu,
+    /// presses each hidden item at most once, and skips overlapping runs.
+    private func restoreMissingCustomBrowserDocksIfEnabled(
+        for profile: TriggerProfile
+    ) {
+        guard ConfigStore.shared.config
+            .restoreMissingCustomBrowserDocksAfterProfileChanges else {
+            return
+        }
+        ActivityLog.shared.log(
+            .info,
+            "Restoring missing Custom Browser Docks (\(profile.name))"
+        )
+        ScriptRunner.run(
+            script: "restore-obs-browser-docks",
+            profileName: "\(profile.name) — Custom Browser Docks"
+        )
+    }
+
     private func runTriggerActions(for profile: TriggerProfile, isSimulated: Bool = false) {
         let obs = OBSWebSocketManager.shared
 
@@ -801,7 +1098,12 @@ class DisplayMonitor {
         runProfile {
             runSceneCollection {
                 runScene {
+                    self.restoreMissingCustomBrowserDocksIfEnabled(for: profile)
                     runConfiguredActions()
+                    if !profile.selectedSceneCollection.isEmpty
+                        || !profile.selectedScene.isEmpty {
+                        self.scheduleCaptureRecovery(for: .sceneSelectionSettled)
+                    }
                 }
             }
         }

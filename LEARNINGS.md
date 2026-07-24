@@ -24,6 +24,42 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-24T13:51:18Z
+**Trigger:** Follow-up request to restore the previously disabled Custom Browser Dock behavior without hiding it in profile scripts
+**Symptom:** The safe standalone `restore-obs-browser-docks` helper still existed at its reversible disabled path, but every OBScene profile command was clean and there was no visible way to opt back into dock restoration.
+**Root cause:** The old integration appended `&& restore-obs-browser-docks` to profile `runScript` strings before the verified OBS selection pipeline. That made the Accessibility side effect hard to discover and could invoke it while OBS was still launching or restarting.
+**Fix:** Add the persisted **Restore missing Custom Browser Docks after profile changes** setting under Wake & Display Recovery. When enabled, OBScene invokes the existing one-shot helper only after its connected profile/scene-collection/scene pipeline settles. The UI names the exact `set channels` and `chat` targets, states that the behavior restores visibility rather than page content, and opens the seven-day dock diagnostics. Keep legacy profile commands free of dock suffixes.
+**Guard:** AppConfig tests prove the setting defaults off for upgrades and an explicit enabled value decodes and round-trips. The standalone helper passes Bash 3.2 syntax, embedded AppleScript compilation, fake one-shot execution, overlap-skip/lock-release, structured-log, and retention tests; the personal dock skill validates. The full OBScene unit suite, Release build, and offscreen Settings render pass.
+---
+
+---
+**Date:** 2026-07-24T13:36:26Z
+**Trigger:** Follow-up objection that OBScene's new wake/display capture recovery must not be hidden behavior
+**Symptom:** Automatic ScreenCaptureKit repair and wake-time OBS selection reconciliation were enabled globally but had no visible control or explanation in OBScene.
+**Root cause:** The recovery was implemented as internal event handling rather than as a persisted user-facing preference.
+**Fix:** Add a dedicated Settings → Wake & Display Recovery group. Its enabled-by-default toggle gates display-change recovery, wake recovery, wake-time profile/scene reconciliation, and WebSocket-reconnect recovery; turning it off does not disable normal configured display profiles. The group states the bounded 0/1-second display and 0/2-second wake schedule and opens the seven-day diagnostics directory.
+**Guard:** AppConfig tests prove legacy configs default to enabled and an explicit disabled value decodes and round-trips. Every delayed recovery attempt checks the current setting again, so disabling it while a retry is pending suppresses that retry. The full unit suite, Release build, and offscreen Settings render pass.
+---
+
+---
+**Date:** 2026-07-24T13:13:49Z
+**Trigger:** Follow-up request to re-enable the disabled OBS Lua capture restarter with self-cleaning logs for future diagnosis
+**Symptom:** The old `obs-macos-capture-restarter.lua` had successfully restarted capture twice on 2026-07-22 but later threw `FILE* expected, got string`; there was no durable, focused recovery history to distinguish a missed trigger, disabled-button 604, successful reactivation, or forced rebuild.
+**Root cause:** Re-enabling the Lua would duplicate OBScene's new event-driven recovery and let two independent systems race over the same ScreenCaptureKit source. The evidence does not establish that the Lua crashed OBS: the verified OBS 32.2.0 crash in this task came from the separate `GetInputPropertiesListPropertyItems` WebSocket request.
+**Fix:** Keep the Lua disabled and record structured recovery events from the owning OBScene implementation. `CaptureRecoveryDiagnostics.swift` writes trigger topology, attempts, WebSocket result codes, reactivation outcomes, and forced-rebuild results to daily `~/Library/Logs/OBScene/capture-recovery/YYYY-MM-DD.ndjson` files. It never stores screenshots, source settings, or credentials and deletes only `.ndjson` files older than seven full days.
+**Guard:** The capture-recovery test suite proves eight-day-old diagnostics are deleted, recent and exactly-seven-day files remain, and unrelated files are untouched. The full unit suite and Xcode Release build pass. Keep the Lua file and all registrations disabled unless OBScene recovery is deliberately removed first.
+---
+
+---
+**Date:** 2026-07-24T12:40:29Z
+**Trigger:** 2026-07-24 task: macOS Screen Capture froze after unplugging displays and closing/reopening the MacBook lid; OBS could also wake with its profile switched but its scene collection left behind
+**Symptom:** OBS logged `Stream stopped as no capture source was not found` five seconds before Clamshell Sleep and left the `macOS Screen Capture` input stopped after wake. A prior sleep had also interrupted OBScene after the profile verified but before the scene-collection switch verified.
+**Root cause:** ScreenCaptureKit stops a built-in-display stream when the lid removes that display, and OBS does not automatically reactivate it when the display returns. The disabled Lua restarter was both broken (`FILE* expected, got string`) and only reacted to an OBS properties update; OBScene had no `NSWorkspace.didWakeNotification` reconciliation, and its WebSocket can remain connected through sleep, so reconnect-only handling cannot cover this state. OBS error 604 means only that `reactivate_capture` is disabled: OBS 32.2.0 can also return 604 while a missing-display target remains black, so 604 is not proof that frames are healthy.
+**Fix:** Commit `df537357ba48` adds event-driven OBScene recovery after wake, display changes, settled scene selection, and WebSocket reconnect. It lists only `screen_capture` inputs and presses OBS's `reactivate_capture` property; success 100 recovers a stopped stream. Wake also reapplies only the last automatic display profile's OBS profile/collection/scene selections, without replaying scripts or output actions. Commit `87daf3d90a89` handles the black-with-604 case on the final bounded wake/display attempt by toggling `show_cursor` and restoring its original value, forcing OBS to rebuild ScreenCaptureKit without changing the selected display or the user's saved cursor preference.
+**Guard:** `scripts/test-macos-capture-recovery.swift` covers stopped success, disabled-button 604, disconnected/no-input no-ops, unexpected failure, the bounded immediate retry schedule, and which triggers may force the final rebuild. The full unit suite, universal CLI build, and Xcode Release build pass. Live OBS 32.2.0 verification first reproduced the misleading state (`reactivate_capture` returned 604 and `GetSourceScreenshot` returned 702), then manually drove the same `show_cursor` toggle/restore sequence as the automatic fallback: both settings updates returned 100, source screenshots succeeded, contained non-black pixels, and produced different hashes one second apart. A screenshot/hash check is still required before calling any 604 result healthy. Do not query `GetInputPropertiesListPropertyItems` for the macOS Screen Capture display property: OBS 32.2.0 crashed with `EXC_BAD_ACCESS` during that request on 2026-07-24. Use the verified-safe `GetInputSettings`, `SetInputSettings`, `GetSourceScreenshot`, `PressInputPropertiesButton`, and profile/scene-collection requests instead.
+---
+
+---
 **Date:** 2026-07-21T14:21:04Z
 **Trigger:** 2026-07-21 task: investigate why the Mac commonly runs out of memory and fix OBScene without changing file-transfer behavior
 **Symptom:** macOS Jetsam snapshots caught installed OBScene 1.54.0 at about 26 GiB resident with a 31 GiB lifetime peak during automatic recording retention verification; the same process returned to 36 MiB after the pass, but system compression and swap pressure restarted other development apps.

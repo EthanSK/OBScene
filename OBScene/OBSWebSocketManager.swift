@@ -172,7 +172,7 @@ class OBSWebSocketManager: ObservableObject {
     // registered so we can time them out and avoid leaking forever if OBS
     // never replies (crash, network drop, etc.).
     private struct PendingCallback {
-        let callback: (Any?) -> Void
+        let callback: (OBSRequestResultSnapshot?) -> Void
         let registeredAt: Date
     }
 
@@ -487,6 +487,18 @@ class OBSWebSocketManager: ObservableObject {
         // `restoreSpaceOnRestart` inside the helper so a user with the
         // toggle off pays nothing.
         startLastSpaceCaptureTimer()
+
+        // A reconnect can follow sleep or an OBS-side WebSocket bounce. It is
+        // not sufficient as the only recovery trigger (the socket often stays
+        // connected through sleep), but it is a useful additional bounded
+        // opportunity to recover a stopped ScreenCaptureKit stream.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard ConfigStore.shared.config
+                .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+                return
+            }
+            self?.reactivateStoppedMacOSScreenCaptures(reason: "WebSocket connected")
+        }
     }
 
     private func handleRequestResponse(_ d: Any) {
@@ -498,8 +510,20 @@ class OBSWebSocketManager: ObservableObject {
         callbackLock.unlock()
 
         if let pending = pending {
-            let data = responseData["responseData"]
-            pending.callback(data)
+            guard let statusData = responseData["requestStatus"] as? [String: Any],
+                  let result = statusData["result"] as? Bool,
+                  let code = statusData["code"] as? Int else {
+                pending.callback(nil)
+                return
+            }
+            pending.callback(
+                OBSRequestResultSnapshot(
+                    result: result,
+                    code: code,
+                    comment: statusData["comment"] as? String,
+                    responseData: responseData["responseData"]
+                )
+            )
         }
     }
 
@@ -784,7 +808,11 @@ class OBSWebSocketManager: ObservableObject {
         }
     }
 
-    private func sendRequest(_ requestType: String, data: [String: Any]? = nil, completion: ((Any?) -> Void)? = nil) {
+    private func sendRequestWithStatus(
+        _ requestType: String,
+        data: [String: Any]? = nil,
+        completion: ((OBSRequestResultSnapshot?) -> Void)? = nil
+    ) {
         callbackLock.lock()
         requestCounter += 1
         let requestId = "req_\(requestCounter)"
@@ -802,6 +830,20 @@ class OBSWebSocketManager: ObservableObject {
         }
 
         sendMessage(op: 6, d: request)
+    }
+
+    private func sendRequest(
+        _ requestType: String,
+        data: [String: Any]? = nil,
+        completion: ((Any?) -> Void)? = nil
+    ) {
+        if let completion {
+            sendRequestWithStatus(requestType, data: data) { response in
+                completion(response?.responseData)
+            }
+        } else {
+            sendRequestWithStatus(requestType, data: data)
+        }
     }
 
     // MARK: - OBS Commands
@@ -1159,6 +1201,254 @@ class OBSWebSocketManager: ObservableObject {
                 DispatchQueue.main.async {
                     ActivityLog.shared.log(.info, "Refreshed browser source '\(inputName)'")
                     print("[OBScene] Refreshed browser source '\(inputName)'")
+                }
+            }
+        }
+    }
+
+    /// Ask OBS to reactivate only stopped macOS Screen Capture inputs.
+    ///
+    /// OBS itself gates the `reactivate_capture` property button. A stopped
+    /// source returns success and starts a fresh ScreenCaptureKit stream; a
+    /// disabled button returns 604 ("property item ... is not enabled").
+    /// Because 604 can also accompany a black missing-display target, the
+    /// caller may request one bounded settings-driven rebuild on the final
+    /// wake/display attempt.
+    func reactivateStoppedMacOSScreenCaptures(
+        reason: String,
+        forceReinitializeWhenAlreadyHealthy: Bool = false
+    ) {
+        let dependencies = MacOSCaptureRecoveryDependencies(
+            isConnected: { [weak self] in self?.isConnected == true },
+            listInputs: { [weak self] completion in
+                guard let self else {
+                    completion(nil)
+                    return
+                }
+                self.sendRequestWithStatus(
+                    "GetInputList",
+                    data: ["inputKind": MacOSCaptureRecoveryEngine.inputKind],
+                    completion: completion
+                )
+            },
+            reactivate: { [weak self] inputName, completion in
+                guard let self else {
+                    completion(nil)
+                    return
+                }
+                self.sendRequestWithStatus(
+                    "PressInputPropertiesButton",
+                    data: [
+                        "inputName": inputName,
+                        "propertyName": MacOSCaptureRecoveryEngine.propertyName
+                    ],
+                    completion: completion
+                )
+            }
+        )
+
+        MacOSCaptureRecoveryEngine.run(dependencies: dependencies) { [weak self] result in
+            switch result {
+            case .notConnected:
+                CaptureRecoveryDiagnostics.shared.record(
+                    "attempt_skipped",
+                    reason: reason,
+                    success: false,
+                    details: ["cause": "websocket_disconnected"]
+                )
+                ActivityLog.shared.log(
+                    .info,
+                    "macOS capture recovery skipped: OBS WebSocket is disconnected (\(reason))"
+                )
+            case .listFailed(let code, let comment):
+                let detail = [code.map(String.init), comment]
+                    .compactMap { $0 }
+                    .joined(separator: ": ")
+                CaptureRecoveryDiagnostics.shared.record(
+                    "input_list_failed",
+                    reason: reason,
+                    responseCode: code,
+                    success: false,
+                    details: comment.map { ["comment": $0] } ?? [:]
+                )
+                ActivityLog.shared.log(
+                    .info,
+                    "Could not list macOS capture sources\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
+                )
+            case .noInputs:
+                CaptureRecoveryDiagnostics.shared.record(
+                    "no_screen_capture_inputs",
+                    reason: reason,
+                    success: true
+                )
+                ActivityLog.shared.log(
+                    .info,
+                    "No macOS Screen Capture inputs found (\(reason))"
+                )
+            case .completed(let entries):
+                for entry in entries {
+                    switch entry.outcome {
+                    case .reactivated:
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reactivated",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode: 100,
+                            success: true
+                        )
+                        ActivityLog.shared.log(
+                            .info,
+                            "Recovered stopped macOS capture '\(entry.inputName)' (\(reason))",
+                            userVisible: true
+                        )
+                    case .alreadyHealthy:
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "reactivation_button_disabled",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode:
+                                MacOSCaptureRecoveryEngine.alreadyHealthyCode,
+                            success: true,
+                            details: [
+                                "forcingReinitialize":
+                                    String(forceReinitializeWhenAlreadyHealthy)
+                            ]
+                        )
+                        if forceReinitializeWhenAlreadyHealthy {
+                            self?.forceReinitializeMacOSScreenCapture(
+                                inputName: entry.inputName,
+                                reason: reason
+                            )
+                        } else {
+                            ActivityLog.shared.log(
+                                .info,
+                                "macOS capture '\(entry.inputName)' has no enabled reactivation button (\(reason))"
+                            )
+                        }
+                    case .failed(let code, let comment):
+                        let detail = [code.map(String.init), comment]
+                            .compactMap { $0 }
+                            .joined(separator: ": ")
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reactivation_failed",
+                            reason: reason,
+                            inputName: entry.inputName,
+                            responseCode: code,
+                            success: false,
+                            details: comment.map { ["comment": $0] } ?? [:]
+                        )
+                        ActivityLog.shared.log(
+                            .info,
+                            "Could not reactivate macOS capture '\(entry.inputName)'\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Force OBS's ScreenCaptureKit source to rebuild even when its
+    /// `reactivate_capture` button is disabled.
+    ///
+    /// OBS 32.2.0 can initialize a missing display target as a black source
+    /// without setting `capture_failed`; that produces the same 604 response
+    /// as a genuinely healthy source. Its update callback also ignores
+    /// identical settings. Toggling `show_cursor` and restoring its original
+    /// value causes two bounded stream rebuilds while leaving the user's
+    /// persisted capture choice unchanged.
+    private func forceReinitializeMacOSScreenCapture(
+        inputName: String,
+        reason: String
+    ) {
+        sendRequestWithStatus(
+            "GetInputSettings",
+            data: ["inputName": inputName]
+        ) { [weak self] response in
+            guard let self,
+                  let response,
+                  response.result,
+                  let data = response.responseData as? [String: Any],
+                  let settings = data["inputSettings"] as? [String: Any] else {
+                CaptureRecoveryDiagnostics.shared.record(
+                    "reinitialize_settings_read_failed",
+                    reason: reason,
+                    inputName: inputName,
+                    responseCode: response?.code,
+                    success: false
+                )
+                ActivityLog.shared.log(
+                    .info,
+                    "Could not read macOS capture settings for '\(inputName)' (\(reason))"
+                )
+                return
+            }
+
+            // OBS defaults show_cursor to true when the key is absent.
+            let originalShowCursor = settings["show_cursor"] as? Bool ?? true
+            let toggledShowCursor = !originalShowCursor
+
+            self.sendRequestWithStatus(
+                "SetInputSettings",
+                data: [
+                    "inputName": inputName,
+                    "inputSettings": ["show_cursor": toggledShowCursor],
+                    "overlay": true
+                ]
+            ) { [weak self] toggleResponse in
+                guard let self else { return }
+
+                // Always issue the restore, even if OBS reported a failure for
+                // the toggle. This makes the original user preference the
+                // final requested state on every path.
+                self.sendRequestWithStatus(
+                    "SetInputSettings",
+                    data: [
+                        "inputName": inputName,
+                        "inputSettings": ["show_cursor": originalShowCursor],
+                        "overlay": true
+                    ]
+                ) { restoreResponse in
+                    if toggleResponse?.result == true
+                        && restoreResponse?.result == true {
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reinitialized",
+                            reason: reason,
+                            inputName: inputName,
+                            responseCode: restoreResponse?.code,
+                            success: true,
+                            details: [
+                                "cursorPreferenceRestored": "true",
+                                "toggleResponseCode":
+                                    toggleResponse.map { String($0.code) }
+                                    ?? "timeout"
+                            ]
+                        )
+                        ActivityLog.shared.log(
+                            .info,
+                            "Reinitialized macOS capture '\(inputName)' (\(reason))"
+                        )
+                    } else {
+                        let toggleCode = toggleResponse
+                            .map { String($0.code) } ?? "timeout"
+                        let restoreCode = restoreResponse
+                            .map { String($0.code) } ?? "timeout"
+                        CaptureRecoveryDiagnostics.shared.record(
+                            "capture_reinitialize_failed",
+                            reason: reason,
+                            inputName: inputName,
+                            responseCode: restoreResponse?.code,
+                            success: false,
+                            details: [
+                                "cursorPreferenceRestoreRequested": "true",
+                                "toggleResponseCode": toggleCode,
+                                "restoreResponseCode": restoreCode
+                            ]
+                        )
+                        ActivityLog.shared.log(
+                            .info,
+                            "Could not fully reinitialize macOS capture '\(inputName)' (toggle \(toggleCode), restore \(restoreCode)) — \(reason)"
+                        )
+                    }
                 }
             }
         }

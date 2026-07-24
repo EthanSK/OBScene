@@ -648,6 +648,23 @@ struct AppConfig: Codable, Equatable {
     var autoLaunchOBS: Bool = true
     var obsLaunchTimeoutSeconds: Int = 30
 
+    /// Recover macOS Screen Capture streams and reconcile interrupted OBS
+    /// profile/scene selections after display changes or system wake.
+    ///
+    /// Defaults to true so the recovery remains active for existing installs,
+    /// but it is explicitly surfaced in Settings → Wake & Display Recovery and can be changed
+    /// without relaunching OBScene.
+    var automaticallyRecoverOBSAfterWakeAndDisplayChanges: Bool = true
+
+    /// Restore the explicitly supported "set channels" and "chat" Custom
+    /// Browser Docks after an OBS profile/scene switch settles.
+    ///
+    /// This is visibility repair only; it never reloads dock page content.
+    /// Keep the default off because existing installs previously asked to
+    /// disable this Accessibility automation. It is a visible opt-in under
+    /// Settings → Wake & Display Recovery.
+    var restoreMissingCustomBrowserDocksAfterProfileChanges: Bool = false
+
     /// Independent automatic recording-transfer setups. Keeping these at the
     /// app level (rather than inside OBS trigger profiles) lets a transfer run
     /// whenever its physical destination volume appears, even if OBS is not
@@ -718,6 +735,14 @@ struct AppConfig: Codable, Equatable {
         hasBeenConfigured = try container.decodeIfPresent(Bool.self, forKey: .hasBeenConfigured) ?? hasBeenConfigured
         autoLaunchOBS = try container.decodeIfPresent(Bool.self, forKey: .autoLaunchOBS) ?? autoLaunchOBS
         obsLaunchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .obsLaunchTimeoutSeconds) ?? obsLaunchTimeoutSeconds
+        automaticallyRecoverOBSAfterWakeAndDisplayChanges = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticallyRecoverOBSAfterWakeAndDisplayChanges
+        ) ?? automaticallyRecoverOBSAfterWakeAndDisplayChanges
+        restoreMissingCustomBrowserDocksAfterProfileChanges = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .restoreMissingCustomBrowserDocksAfterProfileChanges
+        ) ?? restoreMissingCustomBrowserDocksAfterProfileChanges
         fileTransferRules = try container.decodeIfPresent([FileTransferRule].self, forKey: .fileTransferRules) ?? fileTransferRules
         profiles = try container.decodeIfPresent([TriggerProfile].self, forKey: .profiles) ?? profiles
         selectedProfileIndex = try container.decodeIfPresent(Int.self, forKey: .selectedProfileIndex) ?? selectedProfileIndex
