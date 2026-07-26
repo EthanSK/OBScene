@@ -1,4 +1,7 @@
 import Foundation
+import CoreGraphics
+import CryptoKit
+import ImageIO
 
 /// The subset of an OBS WebSocket request response that recovery decisions
 /// need. Keeping this independent from the socket manager makes the recovery
@@ -12,7 +15,7 @@ struct OBSRequestResultSnapshot {
 
 enum MacOSCaptureReactivationOutcome: Equatable {
     case reactivated
-    case alreadyHealthy
+    case buttonDisabled
     case failed(code: Int?, comment: String?)
 }
 
@@ -37,18 +40,273 @@ struct MacOSCaptureRecoveryDependencies {
     ) -> Void
 }
 
+struct MacOSCaptureRecoveryRequest: Equatable {
+    private(set) var reasons: [String]
+
+    init(reason: String) {
+        reasons = [reason]
+    }
+
+    var diagnosticReason: String {
+        reasons.joined(separator: " + ")
+    }
+
+    mutating func merge(_ newer: MacOSCaptureRecoveryRequest) {
+        for reason in newer.reasons where !reasons.contains(reason) {
+            reasons.append(reason)
+        }
+    }
+}
+
+enum MacOSCaptureRecoverySubmission: Equatable {
+    case started
+    case queued(coalescedReasonCount: Int)
+}
+
+/// Allows at most one complete recovery transaction to touch OBS at a time.
+///
+/// Display reconfiguration callbacks can arrive faster than OBS answers the
+/// first `reactivate_capture` request. Keep only one coalesced follow-up while
+/// the current native property-button request is in flight. This prevents
+/// overlapping reactivation calls when macOS emits several display callbacks
+/// for one physical dock connection.
+final class MacOSCaptureRecoverySerialGate {
+    typealias Starter = (
+        _ request: MacOSCaptureRecoveryRequest,
+        _ completion: @escaping () -> Void
+    ) -> Void
+
+    private let start: Starter
+    private var isInFlight = false
+    private var pending: MacOSCaptureRecoveryRequest?
+
+    init(start: @escaping Starter) {
+        self.start = start
+    }
+
+    @discardableResult
+    func submit(
+        _ request: MacOSCaptureRecoveryRequest
+    ) -> MacOSCaptureRecoverySubmission {
+        guard isInFlight else {
+            startNow(request)
+            return .started
+        }
+
+        if var pending {
+            pending.merge(request)
+            self.pending = pending
+        } else {
+            pending = request
+        }
+        return .queued(coalescedReasonCount: pending?.reasons.count ?? 0)
+    }
+
+    private func startNow(_ request: MacOSCaptureRecoveryRequest) {
+        isInFlight = true
+        start(request) { [weak self] in
+            guard let self else { return }
+            if let next = pending {
+                pending = nil
+                startNow(next)
+            } else {
+                isInFlight = false
+            }
+        }
+    }
+}
+
+struct MacOSCaptureScreenshotHealth: Equatable {
+    let width: Int
+    let height: Int
+    let meanLuma: Double
+    let nearBlackPixelRatio: Double
+    let sha256: String
+
+    /// A tiny bright cursor or menu-bar indicator should not make an otherwise
+    /// black frame look healthy. Require both measurable average light and at
+    /// least five percent of sampled pixels above near-black.
+    var isVisiblyNonBlack: Bool {
+        meanLuma > 2 && nearBlackPixelRatio < 0.95
+    }
+
+    static func analyze(dataURL: String) -> Self? {
+        guard let comma = dataURL.firstIndex(of: ","),
+              let imageData = Data(
+                  base64Encoded: String(dataURL[dataURL.index(after: comma)...])
+              ),
+              let imageSource = CGImageSourceCreateWithData(
+                  imageData as CFData,
+                  nil
+              ),
+              let image = CGImageSourceCreateImageAtIndex(
+                  imageSource,
+                  0,
+                  nil
+              ),
+              image.width > 0,
+              image.height > 0 else {
+            return nil
+        }
+
+        let sampleWidth = min(64, image.width)
+        let sampleHeight = min(64, image.height)
+        let bytesPerRow = sampleWidth * 4
+        var pixels = [UInt8](
+            repeating: 0,
+            count: bytesPerRow * sampleHeight
+        )
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let baseAddress = buffer.baseAddress,
+                  let context = CGContext(
+                      data: baseAddress,
+                      width: sampleWidth,
+                      height: sampleHeight,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bytesPerRow,
+                      space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo:
+                          CGImageAlphaInfo.premultipliedLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue
+                  ) else {
+                return false
+            }
+            context.interpolationQuality = .low
+            context.draw(
+                image,
+                in: CGRect(
+                    x: 0,
+                    y: 0,
+                    width: sampleWidth,
+                    height: sampleHeight
+                )
+            )
+            return true
+        }
+        guard rendered else { return nil }
+
+        var lumaSum = 0.0
+        var nearBlackCount = 0
+        let sampleCount = sampleWidth * sampleHeight
+        for index in 0..<sampleCount {
+            let offset = index * 4
+            let red = Double(pixels[offset])
+            let green = Double(pixels[offset + 1])
+            let blue = Double(pixels[offset + 2])
+            let luma = (
+                0.2126 * red
+                + 0.7152 * green
+                + 0.0722 * blue
+            )
+            lumaSum += luma
+            if luma <= 5 {
+                nearBlackCount += 1
+            }
+        }
+
+        // Hash the normalized sample rather than PNG bytes so changing encoder
+        // metadata cannot look like changing screen content.
+        let digest = SHA256.hash(data: Data(pixels))
+        return Self(
+            width: image.width,
+            height: image.height,
+            meanLuma: lumaSum / Double(sampleCount),
+            nearBlackPixelRatio:
+                Double(nearBlackCount) / Double(sampleCount),
+            sha256: digest.map { String(format: "%02x", $0) }.joined()
+        )
+    }
+}
+
+struct MacOSCaptureSceneItemPlacement: Equatable {
+    let positionX: Double
+    let positionY: Double
+    let width: Double
+    let height: Double
+    let alignment: Int
+    let canvasWidth: Double
+    let canvasHeight: Double
+    let left: Double
+    let top: Double
+
+    var right: Double { left + width }
+    var bottom: Double { top + height }
+    var intersectsCanvas: Bool {
+        right > 0
+            && bottom > 0
+            && left < canvasWidth
+            && top < canvasHeight
+    }
+
+    static func analyze(
+        transform: [String: Any],
+        canvasWidth: Double,
+        canvasHeight: Double
+    ) -> Self? {
+        guard canvasWidth > 0,
+              canvasHeight > 0,
+              let positionX =
+                (transform["positionX"] as? NSNumber)?.doubleValue,
+              let positionY =
+                (transform["positionY"] as? NSNumber)?.doubleValue,
+              let rawWidth = (transform["width"] as? NSNumber)?.doubleValue,
+              let rawHeight = (transform["height"] as? NSNumber)?.doubleValue,
+              rawWidth != 0,
+              rawHeight != 0 else {
+            return nil
+        }
+
+        let width = abs(rawWidth)
+        let height = abs(rawHeight)
+        let alignment =
+            (transform["alignment"] as? NSNumber)?.intValue ?? 0
+
+        // libobs alignment flags: left=1, right=2, top=4, bottom=8.
+        // With neither horizontal/vertical flag, the position is centered.
+        let left: Double
+        if alignment & 1 != 0 {
+            left = positionX
+        } else if alignment & 2 != 0 {
+            left = positionX - width
+        } else {
+            left = positionX - width / 2
+        }
+
+        let top: Double
+        if alignment & 4 != 0 {
+            top = positionY
+        } else if alignment & 8 != 0 {
+            top = positionY - height
+        } else {
+            top = positionY - height / 2
+        }
+
+        return Self(
+            positionX: positionX,
+            positionY: positionY,
+            width: width,
+            height: height,
+            alignment: alignment,
+            canvasWidth: canvasWidth,
+            canvasHeight: canvasHeight,
+            left: left,
+            top: top
+        )
+    }
+}
+
 /// Pure orchestration for recovering stopped OBS macOS Screen Capture inputs.
 ///
 /// OBS exposes `reactivate_capture` only while it marks a ScreenCaptureKit
 /// stream as failed. Pressing it in that state returns success (100). Code 604
-/// means only that the property button is disabled; it is the common healthy
-/// response, but OBS 32.2.0 can also return it for a black missing-display
-/// target. Wake/display recovery therefore treats 604 as a safe no-op on the
-/// immediate probe and forces one settings-driven rebuild on its final retry.
+/// means only that the property button is disabled. OBS 32.2.0 can return 604
+/// for both a healthy source and a black missing-display target, so callers
+/// inspect a source frame for reporting but never mutate unrelated source
+/// settings to force a rebuild.
 enum MacOSCaptureRecoveryEngine {
     static let inputKind = "screen_capture"
     static let propertyName = "reactivate_capture"
-    static let alreadyHealthyCode = 604
+    static let buttonDisabledCode = 604
 
     static func run(
         dependencies: MacOSCaptureRecoveryDependencies,
@@ -75,31 +333,46 @@ enum MacOSCaptureRecoveryEngine {
                 return
             }
 
-            let lock = NSLock()
-            var remaining = inputNames.count
-            var entries: [MacOSCaptureRecoveryEntry] = []
+            reactivateInputs(
+                inputNames,
+                index: 0,
+                entries: [],
+                dependencies: dependencies,
+                completion: completion
+            )
+        }
+    }
 
-            for inputName in inputNames {
-                dependencies.reactivate(inputName) { response in
-                    let entry = MacOSCaptureRecoveryEntry(
+    /// OBS can own more than one ScreenCaptureKit input. Property-button
+    /// requests are serialized within the transaction as well as transactions
+    /// being serialized by the outer gate, so no two capture sources are asked
+    /// to tear down or restart concurrently.
+    private static func reactivateInputs(
+        _ inputNames: [String],
+        index: Int,
+        entries: [MacOSCaptureRecoveryEntry],
+        dependencies: MacOSCaptureRecoveryDependencies,
+        completion: @escaping (MacOSCaptureRecoveryRunResult) -> Void
+    ) {
+        guard index < inputNames.count else {
+            completion(.completed(entries))
+            return
+        }
+
+        let inputName = inputNames[index]
+        dependencies.reactivate(inputName) { response in
+            reactivateInputs(
+                inputNames,
+                index: index + 1,
+                entries: entries + [
+                    MacOSCaptureRecoveryEntry(
                         inputName: inputName,
                         outcome: classifyReactivation(response)
                     )
-
-                    var finalEntries: [MacOSCaptureRecoveryEntry]?
-                    lock.lock()
-                    entries.append(entry)
-                    remaining -= 1
-                    if remaining == 0 {
-                        finalEntries = entries.sorted { $0.inputName < $1.inputName }
-                    }
-                    lock.unlock()
-
-                    if let finalEntries {
-                        completion(.completed(finalEntries))
-                    }
-                }
-            }
+                ],
+                dependencies: dependencies,
+                completion: completion
+            )
         }
     }
 
@@ -134,50 +407,25 @@ enum MacOSCaptureRecoveryEngine {
         if response.result {
             return .reactivated
         }
-        if response.code == alreadyHealthyCode {
-            return .alreadyHealthy
+        if response.code == buttonDisabledCode {
+            return .buttonDisabled
         }
         return .failed(code: response.code, comment: response.comment)
     }
 }
 
-/// Recovery is event-driven and bounded. Every event gets an immediate probe;
-/// wake/display events get one short retry because ScreenCaptureKit may lag the
-/// corresponding macOS notification while displays finish coming online.
+/// Capture recovery is intentionally narrow: one native reactivation attempt
+/// ten seconds after external displays connect. The delay is restarted when
+/// another display arrives, allowing the dock topology and ScreenCaptureKit to
+/// settle before OBScene touches OBS.
 enum MacOSCaptureRecoveryTrigger {
-    case wake
-    case displayChange
-    case sceneSelectionSettled
+    case displayConnected
 
     var delays: [TimeInterval] {
-        switch self {
-        case .wake:
-            return [0, 2]
-        case .displayChange:
-            return [0, 1]
-        case .sceneSelectionSettled:
-            return [0]
-        }
+        [10]
     }
 
     var label: String {
-        switch self {
-        case .wake: return "wake"
-        case .displayChange: return "display change"
-        case .sceneSelectionSettled: return "scene selection"
-        }
-    }
-
-    /// A stopped source normally exposes `reactivate_capture`. OBS can also
-    /// load an unavailable display target as a black source while reporting
-    /// that button disabled (604). On the final wake/display attempt, force
-    /// one settings-driven stream rebuild to cover that second state.
-    var forceReinitializeOnFinalAttempt: Bool {
-        switch self {
-        case .wake, .displayChange:
-            return true
-        case .sceneSelectionSettled:
-            return false
-        }
+        "display connected"
     }
 }

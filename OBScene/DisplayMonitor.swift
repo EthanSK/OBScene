@@ -104,11 +104,18 @@ class DisplayMonitor {
                 .displayConnected,
                 "External display connected (\(externalDisplayCount) total)"
             )
+            // A dock can announce several displays in quick succession. Each
+            // additional connection restarts the single ten-second settle
+            // window, so recovery runs once against the final topology.
+            scheduleCaptureRecovery(for: .displayConnected)
         } else if externalDisplayCount < previousCount {
             ActivityLog.shared.log(
                 .displayDisconnected,
                 "External display disconnected (\(externalDisplayCount) total)"
             )
+            // Do not reactivate capture against a topology that is already
+            // disappearing.
+            cancelCaptureRecovery()
         }
 
         // Evaluate each enabled display profile independently. A profile
@@ -164,12 +171,6 @@ class DisplayMonitor {
             }
         }
 
-        // Recover on every completed display add/remove callback, even when
-        // externalDisplayCount is unchanged. Opening the lid while an external
-        // display remains connected adds the built-in display but leaves the
-        // external count at one; that is exactly when a built-in-targeted OBS
-        // source needs to be rebuilt.
-        scheduleCaptureRecovery(for: .displayChange)
     }
 
     private func updateDisplayCount() {
@@ -262,11 +263,9 @@ class DisplayMonitor {
             "Mac woke with \(externalDisplayCount) external display(s); reconciling OBS state"
         )
 
-        // Probe immediately, then once more after ScreenCaptureKit has had a
-        // bounded two-second settle window. A disabled reactivation button
-        // returns 604; the final attempt also rebuilds the stream because 604
-        // can describe either a healthy source or a black missing-display one.
-        scheduleCaptureRecovery(for: .wake)
+        // Wake reconciliation repairs interrupted OBS selections only. Capture
+        // reactivation is deliberately reserved for external-display
+        // connection edges and never runs merely because the Mac woke.
         reconcileLastDisplayProfileAfterWake()
     }
 
@@ -300,11 +299,8 @@ class DisplayMonitor {
                     .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
                     return
                 }
-                let isFinalAttempt = attemptIndex == trigger.delays.count - 1
                 self.requestCaptureRecovery(
-                    reason: "\(trigger.label), attempt \(attemptIndex + 1)",
-                    forceReinitializeWhenAlreadyHealthy:
-                        isFinalAttempt && trigger.forceReinitializeOnFinalAttempt
+                    reason: "\(trigger.label), attempt \(attemptIndex + 1)"
                 )
             }
             captureRecoveryWorkItems.append(item)
@@ -320,16 +316,11 @@ class DisplayMonitor {
         captureRecoveryWorkItems.removeAll()
     }
 
-    private func requestCaptureRecovery(
-        reason: String,
-        forceReinitializeWhenAlreadyHealthy: Bool
-    ) {
+    private func requestCaptureRecovery(reason: String) {
         CaptureRecoveryDiagnostics.shared.record(
-            "attempt_started",
+            "attempt_requested",
             reason: reason,
             details: [
-                "forceReinitializeOnDisabledButton":
-                    String(forceReinitializeWhenAlreadyHealthy),
                 "activeDisplayCount": String(activeDisplayCount),
                 "externalDisplayCount": String(externalDisplayCount),
                 "builtInDisplayOnline": String(builtInDisplayOnline)
@@ -337,17 +328,13 @@ class DisplayMonitor {
         )
         let obs = OBSWebSocketManager.shared
         if obs.isConnected {
-            obs.reactivateStoppedMacOSScreenCaptures(
-                reason: reason,
-                forceReinitializeWhenAlreadyHealthy:
-                    forceReinitializeWhenAlreadyHealthy
-            )
+            obs.reactivateStoppedMacOSScreenCaptures(reason: reason)
             return
         }
 
-        // Recovery should never launch OBS merely because the Mac woke. If OBS
-        // is already running but its socket bounced, reconnect to that process
-        // and then perform the same safe probe.
+        // Display recovery never launches OBS. If OBS is already running but
+        // its socket bounced, reconnect to that process and then perform the
+        // same native property-button request.
         let config = ConfigStore.shared.config
         guard obs.isOBSRunning(),
               config.hasBeenConfigured,
@@ -355,6 +342,10 @@ class DisplayMonitor {
             ActivityLog.shared.log(
                 .info,
                 "macOS capture recovery skipped: OBS is not running or configured (\(reason))"
+            )
+            UserNotifier.post(
+                title: "OBScene: Capture refresh skipped",
+                body: "OBS is not running or its WebSocket connection is not configured."
             )
             return
         }
@@ -366,11 +357,25 @@ class DisplayMonitor {
             autoLaunch: false,
             timeoutSeconds: 10
         ) { result in
-            if case .connected = result {
-                obs.reactivateStoppedMacOSScreenCaptures(
-                    reason: reason,
-                    forceReinitializeWhenAlreadyHealthy:
-                        forceReinitializeWhenAlreadyHealthy
+            switch result {
+            case .connected:
+                obs.reactivateStoppedMacOSScreenCaptures(reason: reason)
+            case .cancelled:
+                break
+            case .obsNotInstalled:
+                UserNotifier.post(
+                    title: "OBScene: Capture refresh skipped",
+                    body: "OBS Studio is not installed."
+                )
+            case .autoLaunchDisabled:
+                UserNotifier.post(
+                    title: "OBScene: Capture refresh skipped",
+                    body: "OBS is not running; capture refresh never launches it automatically."
+                )
+            case .websocketUnavailable:
+                UserNotifier.post(
+                    title: "OBScene: Capture refresh failed",
+                    body: "OBS is running, but its WebSocket server did not respond."
                 )
             }
         }
@@ -482,12 +487,11 @@ class DisplayMonitor {
 
         runProfile {
             runSceneCollection {
-                runScene { [weak self] in
+                runScene {
                     ActivityLog.shared.log(
                         .info,
                         "Wake reconciliation finished for '\(profile.name)'"
                     )
-                    self?.scheduleCaptureRecovery(for: .sceneSelectionSettled)
                 }
             }
         }
@@ -1100,10 +1104,6 @@ class DisplayMonitor {
                 runScene {
                     self.restoreMissingCustomBrowserDocksIfEnabled(for: profile)
                     runConfiguredActions()
-                    if !profile.selectedSceneCollection.isEmpty
-                        || !profile.selectedScene.isEmpty {
-                        self.scheduleCaptureRecovery(for: .sceneSelectionSettled)
-                    }
                 }
             }
         }
