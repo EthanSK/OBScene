@@ -444,6 +444,8 @@ class OBSWebSocketManager: ObservableObject {
                 handleHello(d)
             case 2: // Identified (connected successfully)
                 handleIdentified()
+            case 5: // Event
+                handleEvent(d)
             case 7: // RequestResponse
                 handleRequestResponse(d)
             default:
@@ -451,6 +453,26 @@ class OBSWebSocketManager: ObservableObject {
             }
         } catch {
             print("[OBScene] Failed to parse message: \(error)")
+        }
+    }
+
+    private func handleEvent(_ d: Any) {
+        guard let event = d as? [String: Any] else { return }
+        let eventType = event["eventType"] as? String
+        let eventData = event["eventData"] as? [String: Any]
+        let outputState = eventData?["outputState"] as? String
+
+        guard OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: eventType,
+            outputState: outputState
+        ) else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            DisplayMonitor.shared.scheduleCaptureRecovery(
+                for: .recordingStarted
+            )
         }
     }
 
@@ -1432,7 +1454,7 @@ class OBSWebSocketManager: ObservableObject {
                     if health?.isVisiblyNonBlack == true {
                         UserNotifier.post(
                             title: "OBScene: Screen capture refreshed",
-                            body: "OBS reactivated '\(entry.inputName)' after the displays connected."
+                            body: "OBS reactivated '\(entry.inputName)' using its native Reactivate Capture action."
                         )
                         self.assessMacOSScreenCaptureScenePlacement(
                             inputName: entry.inputName,

@@ -208,11 +208,44 @@ private func testMultipleInputsReactivateSerially() {
     )
 }
 
-private func testDisplayConnectScheduleWaitsTenSeconds() {
-    currentTest = "displayConnectScheduleWaitsTenSeconds"
+private func testRecoveryTriggerSchedules() {
+    currentTest = "recoveryTriggerSchedules"
     expect(
         MacOSCaptureRecoveryTrigger.displayConnected.delays == [10],
         "display connection performs one native attempt after ten seconds"
+    )
+    expect(
+        MacOSCaptureRecoveryTrigger.wake.delays == [10],
+        "system wake performs one native attempt after ten seconds"
+    )
+    expect(
+        MacOSCaptureRecoveryTrigger.recordingStarted.delays == [1],
+        "recording start performs one native attempt after one second"
+    )
+}
+
+private func testRecordingStartedEventMatching() {
+    currentTest = "recordingStartedEventMatching"
+    expect(
+        OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "RecordStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "schedules only after OBS confirms recording started"
+    )
+    expect(
+        !OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "RecordStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTING"
+        ),
+        "ignores the intermediate recording-starting state"
+    )
+    expect(
+        !OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "StreamStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "ignores started events for other outputs"
     )
 }
 
@@ -491,7 +524,8 @@ struct MacOSCaptureRecoveryTests {
         testNoCaptureInputsIsNoOp()
         testUnexpectedFailureIsPreserved()
         testMultipleInputsReactivateSerially()
-        testDisplayConnectScheduleWaitsTenSeconds()
+        testRecoveryTriggerSchedules()
+        testRecordingStartedEventMatching()
         testSerialGateCoalescesWithoutOverlap()
         testScreenshotHealthRejectsBlackFrames()
         testScreenshotHealthAcceptsVisibleFrames()
@@ -499,7 +533,7 @@ struct MacOSCaptureRecoveryTests {
         testDiagnosticsDeleteOnlyExpiredNDJSON()
 
         if failures.isEmpty {
-            print("MacOSCaptureRecovery tests passed (12 tests)")
+            print("MacOSCaptureRecovery tests passed (13 tests)")
         } else {
             print("\(failures.count) MacOSCaptureRecovery test failure(s)")
             exit(1)

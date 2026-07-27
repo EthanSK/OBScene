@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-27T12:04:00Z
+**Trigger:** User opened the MacBook lid and the stopped macOS Screen Capture did not reactivate, then requested the same recovery whenever recording starts
+**Symptom:** The native-only recovery installed on 2026-07-26 ran after an external display connection only. Opening the lid produced `NSWorkspace.didWakeNotification` but no capture-recovery schedule, and starting an OBS recording could not trigger recovery because OBScene subscribed to output events but ignored every obs-websocket Event message (`op` 5).
+**Root cause:** The prior safety narrowing deliberately removed wake recovery while eliminating the unsafe `show_cursor` rebuild, and OBScene's WebSocket message switch had no event handler. The safe native Reactivate Capture transaction existed, but neither missing trigger fed it.
+**Fix:** System wake/lid-open now schedules one native recovery after a ten-second ScreenCaptureKit settle window. An exact `RecordStateChanged` event with `outputState == OBS_WEBSOCKET_OUTPUT_STARTED` schedules one native recovery after one second. Display-connect, wake, and recording-start own independent pending work so repeated callbacks replace only the same trigger; the existing serial gate still prevents OBS operations from overlapping. Success notifications are trigger-neutral, Settings documents all three schedules, and no source setting is changed.
+**Guard:** The focused test proves `[10]` display, `[10]` wake, and `[1]` recording-start schedules and rejects starting-state or non-record events. All five test binaries, an unsigned Xcode Debug build, the Developer ID-signed universal build, `git diff --check`, and the source audit pass. The signed v1.56.0 local app was installed and reconnected while OBS PID 67170 remained unchanged; the persisted recovery toggle is enabled, OBScene stayed healthy, and reconnect emitted no recovery transaction. Real lid-open and real recording-start notifications remain manual verification boundaries because sleeping the Mac or starting a recording was not performed automatically. Never simulate those events by controlling the UI, and never restore the `show_cursor`/`SetInputSettings` rebuild path.
+---
+
+---
 **Date:** 2026-07-26T21:13:08Z
 **Trigger:** User rejected the `show_cursor` toggle/restore fallback after OBS beachballed during automated capture recovery
 **Symptom:** Capture recovery could run immediately and repeatedly on wake, display add/remove callbacks, settled scene selections, and WebSocket reconnects. When OBS returned 604 for a black source, the fallback changed `show_cursor` twice to force ScreenCaptureKit teardown/recreation, even though that setting was unrelated to the requested recovery action.

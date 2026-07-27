@@ -941,11 +941,11 @@ struct SettingsView: View {
         ) {
             VStack(alignment: .leading, spacing: 7) {
                 Toggle(
-                    "Reactivate stopped OBS capture after displays connect",
+                    "Reactivate stopped OBS capture automatically",
                     isOn: $configStore.config
                         .automaticallyRecoverOBSAfterWakeAndDisplayChanges
                 )
-                Text("Waits 10 seconds after the last external display connects, then uses OBS's native Reactivate Capture action once and sends a macOS notification with the result. It does not run on display removal, wake, scene changes, or WebSocket reconnect, and never changes capture-source settings. This toggle also allows OBScene to finish profile, scene collection, and scene selections interrupted by sleep without refreshing capture.")
+                Text("Uses OBS's native Reactivate Capture action once 10 seconds after the last external display connects, 10 seconds after the Mac wakes or its lid opens, and 1 second after recording starts. Each result sends a macOS notification. It does not run on display removal, scene changes, or WebSocket reconnect, and never changes capture-source settings. This toggle also allows OBScene to finish profile, scene collection, and scene selections interrupted by sleep.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

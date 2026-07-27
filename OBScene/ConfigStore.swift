@@ -648,9 +648,9 @@ struct AppConfig: Codable, Equatable {
     var autoLaunchOBS: Bool = true
     var obsLaunchTimeoutSeconds: Int = 30
 
-    /// Reactivate stopped macOS Screen Capture streams ten seconds after
-    /// external displays connect, and reconcile interrupted OBS profile/scene
-    /// selections after system wake.
+    /// Reactivate stopped macOS Screen Capture streams after external displays
+    /// connect, after system wake/lid-open, and when OBS starts recording.
+    /// Also reconcile interrupted OBS profile/scene selections after wake.
     ///
     /// Defaults to true so the recovery remains active for existing installs,
     /// but it is explicitly surfaced in Settings → Wake & Display Recovery and

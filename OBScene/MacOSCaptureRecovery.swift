@@ -414,18 +414,43 @@ enum MacOSCaptureRecoveryEngine {
     }
 }
 
-/// Capture recovery is intentionally narrow: one native reactivation attempt
-/// ten seconds after external displays connect. The delay is restarted when
-/// another display arrives, allowing the dock topology and ScreenCaptureKit to
-/// settle before OBScene touches OBS.
-enum MacOSCaptureRecoveryTrigger {
+/// Capture recovery stays native-only and bounded for each event. Display and
+/// wake recovery wait for macOS/ScreenCaptureKit to settle; recording-start
+/// recovery runs shortly after OBS confirms that recording is active.
+enum MacOSCaptureRecoveryTrigger: Hashable {
     case displayConnected
+    case wake
+    case recordingStarted
 
     var delays: [TimeInterval] {
-        [10]
+        switch self {
+        case .displayConnected, .wake:
+            return [10]
+        case .recordingStarted:
+            return [1]
+        }
     }
 
     var label: String {
-        "display connected"
+        switch self {
+        case .displayConnected:
+            return "display connected"
+        case .wake:
+            return "system wake"
+        case .recordingStarted:
+            return "recording started"
+        }
+    }
+}
+
+/// Keep the obs-websocket event match exact so intermediate starting/stopping
+/// states and unrelated output events cannot schedule capture recovery.
+enum OBSRecordingCaptureRecoveryPolicy {
+    static func shouldSchedule(
+        eventType: String?,
+        outputState: String?
+    ) -> Bool {
+        eventType == "RecordStateChanged"
+            && outputState == "OBS_WEBSOCKET_OUTPUT_STARTED"
     }
 }

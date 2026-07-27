@@ -36,8 +36,13 @@ class DisplayMonitor {
     private var builtInDisplayOnline = false
     private var isMonitoring = false
     private var wakeObserver: NSObjectProtocol?
-    private var captureRecoveryWorkItems: [DispatchWorkItem] = []
-    private var captureRecoveryGeneration = 0
+    /// Each event family owns its own settle window. Repeated callbacks replace
+    /// only the matching trigger, so a display callback cannot cancel a
+    /// pending wake or recording-start recovery (and vice versa).
+    private var captureRecoveryWorkItems:
+        [MacOSCaptureRecoveryTrigger: DispatchWorkItem] = [:]
+    private var captureRecoveryGenerations:
+        [MacOSCaptureRecoveryTrigger: Int] = [:]
     private var lastAutomaticDisplayProfileID: UUID?
 
     /// Per-profile pending trigger work items, keyed by profile ID.
@@ -90,7 +95,7 @@ class DisplayMonitor {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
-        cancelCaptureRecovery()
+        cancelAllCaptureRecovery()
     }
 
     fileprivate func handleDisplayChange() {
@@ -115,7 +120,7 @@ class DisplayMonitor {
             )
             // Do not reactivate capture against a topology that is already
             // disappearing.
-            cancelCaptureRecovery()
+            cancelCaptureRecovery(for: .displayConnected)
         }
 
         // Evaluate each enabled display profile independently. A profile
@@ -263,20 +268,22 @@ class DisplayMonitor {
             "Mac woke with \(externalDisplayCount) external display(s); reconciling OBS state"
         )
 
-        // Wake reconciliation repairs interrupted OBS selections only. Capture
-        // reactivation is deliberately reserved for external-display
-        // connection edges and never runs merely because the Mac woke.
+        // Lid-open and other system wakes can return ScreenCaptureKit with its
+        // prior display stream stopped. Give the topology ten seconds to settle
+        // before one native Reactivate Capture attempt.
+        scheduleCaptureRecovery(for: .wake)
         reconcileLastDisplayProfileAfterWake()
     }
 
-    private func scheduleCaptureRecovery(for trigger: MacOSCaptureRecoveryTrigger) {
-        cancelCaptureRecovery()
+    func scheduleCaptureRecovery(for trigger: MacOSCaptureRecoveryTrigger) {
+        precondition(Thread.isMainThread)
+        cancelCaptureRecovery(for: trigger)
         guard ConfigStore.shared.config
             .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
             return
         }
-        captureRecoveryGeneration += 1
-        let generation = captureRecoveryGeneration
+        let generation = captureRecoveryGenerations[trigger, default: 0] + 1
+        captureRecoveryGenerations[trigger] = generation
         CaptureRecoveryDiagnostics.shared.record(
             "recovery_scheduled",
             reason: trigger.label,
@@ -290,30 +297,40 @@ class DisplayMonitor {
             ]
         )
 
-        for (attemptIndex, delay) in trigger.delays.enumerated() {
-            let item = DispatchWorkItem { [weak self] in
-                guard let self, self.captureRecoveryGeneration == generation else {
-                    return
-                }
-                guard ConfigStore.shared.config
-                    .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
-                    return
-                }
-                self.requestCaptureRecovery(
-                    reason: "\(trigger.label), attempt \(attemptIndex + 1)"
-                )
+        guard let delay = trigger.delays.first else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.captureRecoveryGenerations[trigger] == generation else {
+                return
             }
-            captureRecoveryWorkItems.append(item)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            self.captureRecoveryWorkItems.removeValue(forKey: trigger)
+            guard ConfigStore.shared.config
+                .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+                return
+            }
+            self.requestCaptureRecovery(
+                reason: "\(trigger.label), attempt 1"
+            )
         }
+        captureRecoveryWorkItems[trigger] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    private func cancelCaptureRecovery() {
-        captureRecoveryGeneration += 1
-        for item in captureRecoveryWorkItems {
+    private func cancelCaptureRecovery(
+        for trigger: MacOSCaptureRecoveryTrigger
+    ) {
+        captureRecoveryGenerations[trigger, default: 0] += 1
+        captureRecoveryWorkItems.removeValue(forKey: trigger)?.cancel()
+    }
+
+    private func cancelAllCaptureRecovery() {
+        for (_, item) in captureRecoveryWorkItems {
             item.cancel()
         }
         captureRecoveryWorkItems.removeAll()
+        for trigger in Array(captureRecoveryGenerations.keys) {
+            captureRecoveryGenerations[trigger, default: 0] += 1
+        }
     }
 
     private func requestCaptureRecovery(reason: String) {
