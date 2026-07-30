@@ -19,6 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingStatusMenuItem: NSMenuItem!
     private var fileTransferStatusMenuItem: NSMenuItem!
     private var runFileTransfersMenuItem: NSMenuItem!
+    private var refreshCaptureSourceMenuItem: NSMenuItem!
     /// "Simulate Last Trigger" — re-runs the most recently auto-fired profile.
     /// Useful when OBS missed the original trigger (Safe Mode dialog, hung
     /// WebSocket, dropped USB event). Disabled until at least one real
@@ -421,6 +422,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         reconnectItem.target = self
         menu.addItem(reconnectItem)
 
+        refreshCaptureSourceMenuItem = NSMenuItem(
+            title: "Refresh macOS Capture Source",
+            action: #selector(refreshCaptureSource),
+            keyEquivalent: ""
+        )
+        refreshCaptureSourceMenuItem.target = self
+        refreshCaptureSourceMenuItem.toolTip =
+            "Ask OBS to reactivate stopped macOS Screen Capture sources."
+        refreshCaptureSourceMenuItem.isEnabled = false
+        menu.addItem(refreshCaptureSourceMenuItem)
+
         runFileTransfersMenuItem = NSMenuItem(
             title: "Check File Transfers Now",
             action: #selector(runFileTransfersNow),
@@ -465,16 +477,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switch obsManager.connectionState {
         case .connected:
             obsStatusMenuItem.title = "OBS: Connected"
+            refreshCaptureSourceMenuItem.isEnabled = true
             if !obsManager.currentScene.isEmpty {
                 sceneMenuItem.title = "Scene: \(obsManager.currentScene)"
             } else {
                 sceneMenuItem.title = "Scene: —"
             }
         case .retrying(let nextAttemptAt, _):
+            refreshCaptureSourceMenuItem.isEnabled = false
             let remaining = max(0, Int(ceil(nextAttemptAt.timeIntervalSinceNow)))
             obsStatusMenuItem.title = "OBS: Retrying in \(remaining)s…"
             sceneMenuItem.title = "Scene: —"
         case .disconnected(let message):
+            refreshCaptureSourceMenuItem.isEnabled = false
             if let message = message, !message.isEmpty {
                 obsStatusMenuItem.title = "OBS: \(truncate(message, limit: 50))"
             } else {
@@ -482,6 +497,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             sceneMenuItem.title = "Scene: —"
         case .idle:
+            refreshCaptureSourceMenuItem.isEnabled = false
             obsStatusMenuItem.title = "OBS: Not configured"
             sceneMenuItem.title = "Scene: —"
         }
@@ -767,6 +783,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             obsManager.reconnectNow()
         }
+    }
+
+    /// Manually run the same serialized, native-only capture recovery used by
+    /// the optional automatic triggers. This deliberately bypasses the
+    /// automatic-recovery preference: the user explicitly requested this one
+    /// attempt from the menu. The recovery engine only presses OBS's own
+    /// `reactivate_capture` button and never mutates capture-source settings.
+    @objc private func refreshCaptureSource() {
+        ActivityLog.shared.log(
+            .info,
+            "Manual macOS capture refresh requested from the menu bar",
+            userVisible: true
+        )
+        obsManager.reactivateStoppedMacOSScreenCaptures(
+            reason: "manual menu bar refresh"
+        )
     }
 
     @objc private func runFileTransfersNow() {

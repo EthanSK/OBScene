@@ -114,6 +114,7 @@ struct MenuBarDropdownMockupView: View {
 
             actionRow(title: "Settings…", shortcut: "⌘,")
             actionRow(title: "Reconnect to OBS", shortcut: "⌘R")
+            actionRow(title: "Refresh macOS Capture Source", shortcut: nil)
             actionRow(title: "Check File Transfers Now", shortcut: nil)
 
             separator

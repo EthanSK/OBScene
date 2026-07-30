@@ -652,12 +652,12 @@ struct AppConfig: Codable, Equatable {
     /// connect, after system wake/lid-open, and when OBS starts recording.
     /// Also reconcile interrupted OBS profile/scene selections after wake.
     ///
-    /// Defaults to true so the recovery remains active for existing installs,
-    /// but it is explicitly surfaced in Settings → Wake & Display Recovery and
-    /// can be changed without relaunching OBScene. Capture recovery only presses
-    /// OBS's native `reactivate_capture` property button; it never mutates source
-    /// settings to force a rebuild.
-    var automaticallyRecoverOBSAfterWakeAndDisplayChanges: Bool = true
+    /// Defaults to false so upgrades and fresh installs never opt into capture
+    /// automation implicitly. It is explicitly surfaced in Settings → Wake &
+    /// Display Recovery and can be changed without relaunching OBScene. Capture
+    /// recovery only presses OBS's native `reactivate_capture` property button;
+    /// it never mutates source settings to force a rebuild.
+    var automaticallyRecoverOBSAfterWakeAndDisplayChanges: Bool = false
 
     /// Restore the explicitly supported "set channels" and "chat" Custom
     /// Browser Docks after an OBS profile/scene switch settles.

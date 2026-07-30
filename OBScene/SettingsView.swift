@@ -945,7 +945,7 @@ struct SettingsView: View {
                     isOn: $configStore.config
                         .automaticallyRecoverOBSAfterWakeAndDisplayChanges
                 )
-                Text("Uses OBS's native Reactivate Capture action once 10 seconds after the last external display connects, 10 seconds after the Mac wakes or its lid opens, and 1 second after recording starts. Each result sends a macOS notification. It does not run on display removal, scene changes, or WebSocket reconnect, and never changes capture-source settings. This toggle also allows OBScene to finish profile, scene collection, and scene selections interrupted by sleep.")
+                Text("Off by default. When enabled, uses OBS's native Reactivate Capture action once 10 seconds after the last external display connects, 10 seconds after the Mac wakes or its lid opens, and 1 second after recording starts. Each result sends a macOS notification. It does not run on display removal, scene changes, or WebSocket reconnect, and never changes capture-source settings. This toggle also allows OBScene to finish profile, scene collection, and scene selections interrupted by sleep.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

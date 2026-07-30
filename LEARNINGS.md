@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-30T12:02:33Z
+**Trigger:** User asked for a menu-bar command to refresh macOS capture manually while automatic capture recovery remains disabled
+**Symptom:** The safe native `reactivate_capture` transaction existed only behind automatic wake, display-connect, and recording-start triggers. After those triggers were disabled, there was no user-invoked recovery path in the menu-bar dropdown.
+**Root cause:** `AppDelegate.setupMenuBar()` exposed OBS reconnect and file-transfer commands but did not expose `OBSWebSocketManager.reactivateStoppedMacOSScreenCaptures(reason:)`.
+**Fix:** Add **Refresh macOS Capture Source** beside the OBS commands. Enable it only while OBS WebSocket is connected and route clicks through the existing serialized native-only recovery gate with reason `manual menu bar refresh`. Manual invocation intentionally bypasses the automatic-recovery preference but never changes capture-source settings. Mirror the row in `MenuBarDropdownMockupView`. Default automatic recovery to off for missing/legacy configuration keys so fresh installs and upgrades never opt in implicitly.
+**Guard:** AppConfig tests must prove missing recovery preferences default off while an explicit opt-in decodes and round-trips. The full focused test suite, Debug app build, source audit, and offscreen menu render must pass. Keep automatic recovery disabled in persisted user configuration; this command is the explicit one-shot replacement.
+---
+
+---
 **Date:** 2026-07-27T12:04:00Z
 **Trigger:** User opened the MacBook lid and the stopped macOS Screen Capture did not reactivate, then requested the same recovery whenever recording starts
 **Symptom:** The native-only recovery installed on 2026-07-26 ran after an external display connection only. Opening the lid produced `NSWorkspace.didWakeNotification` but no capture-recovery schedule, and starting an OBS recording could not trigger recovery because OBScene subscribed to output events but ignored every obs-websocket Event message (`op` 5).
