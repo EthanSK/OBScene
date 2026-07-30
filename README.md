@@ -36,6 +36,7 @@ Plug in your battlestation displays, attach a USB capture device, or hit a custo
 - **Mission Control Space restoration.** When OBScene restarts OBS for you, it remembers which Space (Mission Control workspace) the OBS window was on and moves it back after relaunch — so the restart doesn't yank OBS onto whichever Space you're currently viewing. Uses the same private SkyLight SPI yabai and Hammerspoon rely on, with the macOS 14.5+ compat-ID workaround. Persisted across runs.
 - **Safe-Mode dialog auto-dismiss.** OBS shows a "did not shut down properly — Launch Normally / Safe Mode / Cancel" dialog after an unclean exit. When OBScene auto-launches OBS on a trigger, that modal would stall the trigger forever; the dialog dismisser watches for it via the Accessibility API and clicks **Launch Normally** for you. Matches OBS 28.x and 32.x button labels.
 - **Auto-launch OBS.** If OBS isn't running when a trigger fires, OBScene launches it and polls the WebSocket port until it comes up, then runs the actions.
+- **Manual macOS capture refresh.** Use **Refresh macOS Capture Source** in the menu-bar dropdown to ask OBS to reactivate any stopped macOS Screen Capture source. It uses OBS's native action only and never changes source settings; automatic wake/display/recording recovery can remain disabled.
 - **Browser refresh.** Optionally refreshes all open tabs in any running browser (Chrome, Safari, Arc, Brave, Edge, …) when a profile fires. Useful for browser-based stream overlays that get glitchy after a display change.
 - **Activity log.** A live in-app feed of every event — user-visible by default, with a verbose toggle that shows the full debug stream (restart pipeline checkpoints, WebSocket reconnects, sentinel sweeps, etc.). Also written to `~/Library/Logs/OBScene/activity.log`.
 - **Automatic recording transfers.** Choose a recordings folder on the Mac and a destination folder on an external drive. OBScene identifies the exact drive by filesystem UUID, starts when that drive mounts (and rechecks every 15 minutes while it remains attached), preserves subfolders, and posts start/completion/error notifications.
@@ -172,7 +173,7 @@ File transfers are independent of the OBS connection. `NSWorkspace` mount notifi
 
 ## Release status
 
-Latest release: **v1.47** ([appcast.xml](https://ethansk.github.io/OBScene/appcast.xml)). Universal binary, macOS 13+. Publishes automatically on every push to `main` via [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Latest release: see [GitHub Releases](https://github.com/EthanSK/OBScene/releases/latest) and the live [appcast.xml](https://ethansk.github.io/OBScene/appcast.xml). Universal binary, macOS 13+. Publishes automatically on every push to `main` via [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Architecture
 

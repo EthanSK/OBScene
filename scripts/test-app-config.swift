@@ -6,28 +6,28 @@ struct AppConfigTests {
         let decoder = JSONDecoder()
 
         let legacy = try decoder.decode(AppConfig.self, from: Data("{}".utf8))
-        guard legacy.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
-            fatalError("missing recovery toggle must default to enabled")
+        guard !legacy.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            fatalError("missing recovery toggle must default to disabled")
         }
         guard !legacy.restoreMissingCustomBrowserDocksAfterProfileChanges else {
             fatalError("missing dock-restoration toggle must default to disabled")
         }
 
-        let disabledJSON = """
-        {"automaticallyRecoverOBSAfterWakeAndDisplayChanges":false}
+        let enabledJSON = """
+        {"automaticallyRecoverOBSAfterWakeAndDisplayChanges":true}
         """
-        let disabled = try decoder.decode(
+        let enabled = try decoder.decode(
             AppConfig.self,
-            from: Data(disabledJSON.utf8)
+            from: Data(enabledJSON.utf8)
         )
-        guard !disabled.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
-            fatalError("explicitly disabled recovery toggle was not decoded")
+        guard enabled.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            fatalError("explicitly enabled recovery toggle was not decoded")
         }
 
-        let encoded = try JSONEncoder().encode(disabled)
+        let encoded = try JSONEncoder().encode(enabled)
         let roundTrip = try decoder.decode(AppConfig.self, from: encoded)
-        guard !roundTrip.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
-            fatalError("disabled recovery toggle did not persist")
+        guard roundTrip.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
+            fatalError("enabled recovery toggle did not persist")
         }
 
         let dockEnabledJSON = """

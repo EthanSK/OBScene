@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 
 private var failures: [String] = []
 private var currentTest = ""
@@ -69,8 +71,8 @@ private func testStoppedCaptureReactivates() {
     )
 }
 
-private func testDisabledButtonIsNoOp() {
-    currentTest = "disabledButtonIsNoOp"
+private func testDisabledButtonRemainsAmbiguous() {
+    currentTest = "disabledButtonRemainsAmbiguous"
     var result: MacOSCaptureRecoveryRunResult?
     let dependencies = MacOSCaptureRecoveryDependencies(
         isConnected: { true },
@@ -89,9 +91,9 @@ private func testDisabledButtonIsNoOp() {
 
     expect(
         result == .completed([
-            MacOSCaptureRecoveryEntry(inputName: "Display", outcome: .alreadyHealthy)
+            MacOSCaptureRecoveryEntry(inputName: "Display", outcome: .buttonDisabled)
         ]),
-        "OBS 604 is classified as a disabled-button no-op"
+        "OBS 604 is classified only as a disabled property button"
     )
 }
 
@@ -157,31 +159,293 @@ private func testUnexpectedFailureIsPreserved() {
     )
 }
 
-private func testEventScheduleIsImmediateAndBounded() {
-    currentTest = "eventScheduleIsImmediateAndBounded"
+private func testMultipleInputsReactivateSerially() {
+    currentTest = "multipleInputsReactivateSerially"
+    var started: [String] = []
+    var pendingCompletions: [(OBSRequestResultSnapshot?) -> Void] = []
+    var result: MacOSCaptureRecoveryRunResult?
+    let dependencies = MacOSCaptureRecoveryDependencies(
+        isConnected: { true },
+        listInputs: { completion in
+            completion(success(inputs: [
+                ["inputName": "Display B"],
+                ["inputName": "Display A"]
+            ]))
+        },
+        reactivate: { inputName, completion in
+            started.append(inputName)
+            pendingCompletions.append(completion)
+        }
+    )
+
+    MacOSCaptureRecoveryEngine.run(dependencies: dependencies) { result = $0 }
+    expect(started == ["Display A"], "starts only the first sorted input")
+    expect(result == nil, "does not finish while the first input is pending")
+
+    pendingCompletions.removeFirst()(success())
     expect(
-        MacOSCaptureRecoveryTrigger.wake.delays == [0, 2],
-        "wake probes immediately and once after two seconds"
+        started == ["Display A", "Display B"],
+        "starts the second input only after the first completes"
+    )
+    expect(result == nil, "waits for the second input")
+
+    pendingCompletions.removeFirst()(failure(
+        code: 604,
+        comment: "The property item found is not enabled."
+    ))
+    expect(
+        result == .completed([
+            MacOSCaptureRecoveryEntry(
+                inputName: "Display A",
+                outcome: .reactivated
+            ),
+            MacOSCaptureRecoveryEntry(
+                inputName: "Display B",
+                outcome: .buttonDisabled
+            )
+        ]),
+        "returns every serially collected input result"
+    )
+}
+
+private func testRecoveryTriggerSchedules() {
+    currentTest = "recoveryTriggerSchedules"
+    expect(
+        MacOSCaptureRecoveryTrigger.displayConnected.delays == [10],
+        "display connection performs one native attempt after ten seconds"
     )
     expect(
-        MacOSCaptureRecoveryTrigger.displayChange.delays == [0, 1],
-        "display change probes immediately and once after one second"
+        MacOSCaptureRecoveryTrigger.wake.delays == [10],
+        "system wake performs one native attempt after ten seconds"
     )
     expect(
-        MacOSCaptureRecoveryTrigger.sceneSelectionSettled.delays == [0],
-        "settled scene selection probes immediately"
+        MacOSCaptureRecoveryTrigger.recordingStarted.delays == [1],
+        "recording start performs one native attempt after one second"
+    )
+}
+
+private func testRecordingStartedEventMatching() {
+    currentTest = "recordingStartedEventMatching"
+    expect(
+        OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "RecordStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "schedules only after OBS confirms recording started"
     )
     expect(
-        MacOSCaptureRecoveryTrigger.wake.forceReinitializeOnFinalAttempt,
-        "wake forces one final stream rebuild when OBS reports 604"
+        !OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "RecordStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTING"
+        ),
+        "ignores the intermediate recording-starting state"
     )
     expect(
-        MacOSCaptureRecoveryTrigger.displayChange.forceReinitializeOnFinalAttempt,
-        "display change forces one final stream rebuild when OBS reports 604"
+        !OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: "StreamStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "ignores started events for other outputs"
+    )
+}
+
+private func testSerialGateCoalescesWithoutOverlap() {
+    currentTest = "serialGateCoalescesWithoutOverlap"
+    var started: [MacOSCaptureRecoveryRequest] = []
+    var completions: [() -> Void] = []
+    var concurrentRuns = 0
+    var maximumConcurrentRuns = 0
+
+    let gate = MacOSCaptureRecoverySerialGate { request, completion in
+        concurrentRuns += 1
+        maximumConcurrentRuns = max(maximumConcurrentRuns, concurrentRuns)
+        started.append(request)
+        completions.append {
+            concurrentRuns -= 1
+            completion()
+        }
+    }
+
+    let first = MacOSCaptureRecoveryRequest(reason: "display connected, batch 1")
+    let second = MacOSCaptureRecoveryRequest(reason: "display connected, batch 2")
+    let third = MacOSCaptureRecoveryRequest(reason: "display connected, batch 3")
+
+    expect(gate.submit(first) == .started, "starts the first request")
+    expect(
+        gate.submit(second) == .queued(coalescedReasonCount: 1),
+        "queues a follow-up while the first request is pending"
     )
     expect(
-        !MacOSCaptureRecoveryTrigger.sceneSelectionSettled.forceReinitializeOnFinalAttempt,
-        "normal scene selection does not force a disabled-button rebuild"
+        gate.submit(third) == .queued(coalescedReasonCount: 2),
+        "coalesces further trigger churn into the one pending request"
+    )
+    expect(started == [first], "never starts a second request concurrently")
+
+    let finishFirst = completions.removeFirst()
+    finishFirst()
+
+    expect(started.count == 2, "starts the coalesced follow-up after completion")
+    expect(
+        started[1].reasons == [
+            "display connected, batch 2",
+            "display connected, batch 3"
+        ],
+        "preserves every coalesced trigger reason"
+    )
+    expect(maximumConcurrentRuns == 1, "allows at most one recovery transaction")
+
+    let finishSecond = completions.removeFirst()
+    finishSecond()
+    expect(concurrentRuns == 0, "returns to idle after the follow-up completes")
+}
+
+private func screenshotDataURL(
+    width: Int,
+    height: Int,
+    pixelAt: (Int, Int) -> (UInt8, UInt8, UInt8, UInt8)
+) -> String {
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width {
+            let (red, green, blue, alpha) = pixelAt(x, y)
+            let offset = (y * width + x) * 4
+            pixels[offset] = red
+            pixels[offset + 1] = green
+            pixels[offset + 2] = blue
+            pixels[offset + 3] = alpha
+        }
+    }
+    let provider = CGDataProvider(data: Data(pixels) as CFData)!
+    let image = CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(
+            rawValue:
+                CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.byteOrder32Big.rawValue
+        ),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+    )!
+    let png = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(
+        png,
+        "public.png" as CFString,
+        1,
+        nil
+    )!
+    CGImageDestinationAddImage(destination, image, nil)
+    precondition(CGImageDestinationFinalize(destination))
+    return "data:image/png;base64,\((png as Data).base64EncodedString())"
+}
+
+private func testScreenshotHealthRejectsBlackFrames() {
+    currentTest = "screenshotHealthRejectsBlackFrames"
+    let black = screenshotDataURL(width: 8, height: 8) { _, _ in
+        (0, 0, 0, 255)
+    }
+    let blackHealth = MacOSCaptureScreenshotHealth.analyze(dataURL: black)
+    expect(blackHealth != nil, "decodes a valid black PNG")
+    expect(
+        blackHealth?.isVisiblyNonBlack == false,
+        "rejects an all-black capture frame"
+    )
+
+    let cursorOnly = screenshotDataURL(width: 8, height: 8) { x, y in
+        x == 0 && y == 0 ? (255, 255, 255, 255) : (0, 0, 0, 255)
+    }
+    expect(
+        MacOSCaptureScreenshotHealth
+            .analyze(dataURL: cursorOnly)?
+            .isVisiblyNonBlack == false,
+        "a tiny bright cursor does not make a black frame healthy"
+    )
+    let indicatorOnly = screenshotDataURL(width: 64, height: 64) { _, y in
+        y < 2 ? (255, 255, 255, 255) : (0, 0, 0, 255)
+    }
+    expect(
+        MacOSCaptureScreenshotHealth
+            .analyze(dataURL: indicatorOnly)?
+            .isVisiblyNonBlack == false,
+        "a thin bright indicator does not make a black frame healthy"
+    )
+    expect(
+        MacOSCaptureScreenshotHealth.analyze(dataURL: "not-an-image") == nil,
+        "rejects malformed screenshot data"
+    )
+}
+
+private func testScreenshotHealthAcceptsVisibleFrames() {
+    currentTest = "screenshotHealthAcceptsVisibleFrames"
+    let visible = screenshotDataURL(width: 8, height: 8) { x, y in
+        (
+            UInt8((x + 1) * 255 / 9),
+            UInt8((y + 1) * 255 / 9),
+            102,
+            255
+        )
+    }
+    let health = MacOSCaptureScreenshotHealth.analyze(dataURL: visible)
+    expect(health?.isVisiblyNonBlack == true, "accepts a visibly non-black frame")
+    expect(health?.width == 8 && health?.height == 8, "records frame dimensions")
+    expect(health?.sha256.count == 64, "records a content hash without the image")
+}
+
+private func testSceneItemPlacementDetectsOffCanvasCapture() {
+    currentTest = "sceneItemPlacementDetectsOffCanvasCapture"
+    let offCanvas = MacOSCaptureSceneItemPlacement.analyze(
+        transform: [
+            "positionX": -6206.0,
+            "positionY": 2078.0,
+            "width": 3440.0,
+            "height": 1440.0,
+            "alignment": 5
+        ],
+        canvasWidth: 3440,
+        canvasHeight: 1440
+    )
+    expect(offCanvas != nil, "parses the live OBS transform shape")
+    expect(
+        offCanvas?.intersectsCanvas == false,
+        "detects a healthy capture item positioned entirely off-canvas"
+    )
+
+    let fullCanvas = MacOSCaptureSceneItemPlacement.analyze(
+        transform: [
+            "positionX": 0.0,
+            "positionY": 0.0,
+            "width": 3440.0,
+            "height": 1440.0,
+            "alignment": 5
+        ],
+        canvasWidth: 3440,
+        canvasHeight: 1440
+    )
+    expect(
+        fullCanvas?.intersectsCanvas == true,
+        "accepts a full-canvas top-left-aligned source"
+    )
+
+    let partiallyVisible = MacOSCaptureSceneItemPlacement.analyze(
+        transform: [
+            "positionX": -50.0,
+            "positionY": 720.0,
+            "width": 200.0,
+            "height": 200.0,
+            "alignment": 0
+        ],
+        canvasWidth: 3440,
+        canvasHeight: 1440
+    )
+    expect(
+        partiallyVisible?.intersectsCanvas == true,
+        "handles center alignment and partial canvas intersection"
     )
 }
 
@@ -255,15 +519,21 @@ private func testDiagnosticsDeleteOnlyExpiredNDJSON() {
 struct MacOSCaptureRecoveryTests {
     static func main() {
         testStoppedCaptureReactivates()
-        testDisabledButtonIsNoOp()
+        testDisabledButtonRemainsAmbiguous()
         testDisconnectedStopsBeforeListing()
         testNoCaptureInputsIsNoOp()
         testUnexpectedFailureIsPreserved()
-        testEventScheduleIsImmediateAndBounded()
+        testMultipleInputsReactivateSerially()
+        testRecoveryTriggerSchedules()
+        testRecordingStartedEventMatching()
+        testSerialGateCoalescesWithoutOverlap()
+        testScreenshotHealthRejectsBlackFrames()
+        testScreenshotHealthAcceptsVisibleFrames()
+        testSceneItemPlacementDetectsOffCanvasCapture()
         testDiagnosticsDeleteOnlyExpiredNDJSON()
 
         if failures.isEmpty {
-            print("MacOSCaptureRecovery tests passed (7 tests)")
+            print("MacOSCaptureRecovery tests passed (13 tests)")
         } else {
             print("\(failures.count) MacOSCaptureRecovery test failure(s)")
             exit(1)

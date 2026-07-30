@@ -183,6 +183,23 @@ class OBSWebSocketManager: ObservableObject {
     private var requestCounter = 0
     private var callbackCleanupTimer: Timer?
 
+    /// Serializes the full macOS Screen Capture recovery transaction, including
+    /// post-request frame validation. Rapid display callbacks otherwise overlap
+    /// OBS property-button operations while ScreenCaptureKit is settling.
+    private lazy var macOSCaptureRecoveryGate =
+        MacOSCaptureRecoverySerialGate { [weak self] request, completion in
+            guard let self else {
+                completion()
+                return
+            }
+            self.performMacOSCaptureRecovery(request) {
+                // Gate state is main-queue confined. WebSocket callbacks arrive
+                // on URLSession's delegate queue, so always hand completion
+                // back before starting a coalesced follow-up.
+                DispatchQueue.main.async(execute: completion)
+            }
+        }
+
     /// Maximum time we'll wait for a request response before considering it
     /// timed out and evicting its callback.
     private let callbackTimeout: TimeInterval = 30
@@ -427,6 +444,8 @@ class OBSWebSocketManager: ObservableObject {
                 handleHello(d)
             case 2: // Identified (connected successfully)
                 handleIdentified()
+            case 5: // Event
+                handleEvent(d)
             case 7: // RequestResponse
                 handleRequestResponse(d)
             default:
@@ -434,6 +453,26 @@ class OBSWebSocketManager: ObservableObject {
             }
         } catch {
             print("[OBScene] Failed to parse message: \(error)")
+        }
+    }
+
+    private func handleEvent(_ d: Any) {
+        guard let event = d as? [String: Any] else { return }
+        let eventType = event["eventType"] as? String
+        let eventData = event["eventData"] as? [String: Any]
+        let outputState = eventData?["outputState"] as? String
+
+        guard OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+            eventType: eventType,
+            outputState: outputState
+        ) else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            DisplayMonitor.shared.scheduleCaptureRecovery(
+                for: .recordingStarted
+            )
         }
     }
 
@@ -488,17 +527,6 @@ class OBSWebSocketManager: ObservableObject {
         // toggle off pays nothing.
         startLastSpaceCaptureTimer()
 
-        // A reconnect can follow sleep or an OBS-side WebSocket bounce. It is
-        // not sufficient as the only recovery trigger (the socket often stays
-        // connected through sleep), but it is a useful additional bounded
-        // opportunity to recover a stopped ScreenCaptureKit stream.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard ConfigStore.shared.config
-                .automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
-                return
-            }
-            self?.reactivateStoppedMacOSScreenCaptures(reason: "WebSocket connected")
-        }
     }
 
     private func handleRequestResponse(_ d: Any) {
@@ -1211,13 +1239,56 @@ class OBSWebSocketManager: ObservableObject {
     /// OBS itself gates the `reactivate_capture` property button. A stopped
     /// source returns success and starts a fresh ScreenCaptureKit stream; a
     /// disabled button returns 604 ("property item ... is not enabled").
-    /// Because 604 can also accompany a black missing-display target, the
-    /// caller may request one bounded settings-driven rebuild on the final
-    /// wake/display attempt.
-    func reactivateStoppedMacOSScreenCaptures(
-        reason: String,
-        forceReinitializeWhenAlreadyHealthy: Bool = false
+    /// A disabled button is inspected and reported, never bypassed by changing
+    /// unrelated source settings.
+    func reactivateStoppedMacOSScreenCaptures(reason: String) {
+        let request = MacOSCaptureRecoveryRequest(reason: reason)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let submission = macOSCaptureRecoveryGate.submit(request)
+            if case .queued(let reasonCount) = submission {
+                CaptureRecoveryDiagnostics.shared.record(
+                    "attempt_coalesced",
+                    reason: request.diagnosticReason,
+                    details: [
+                        "coalescedPendingReasonCount": String(reasonCount)
+                    ]
+                )
+            }
+        }
+    }
+
+    private func performMacOSCaptureRecovery(
+        _ request: MacOSCaptureRecoveryRequest,
+        completion: @escaping () -> Void
     ) {
+        let startedAt = Date()
+        let reason = request.diagnosticReason
+        CaptureRecoveryDiagnostics.shared.record(
+            "attempt_started",
+            reason: reason,
+            details: [
+                "coalescedReasonCount": String(request.reasons.count)
+            ]
+        )
+
+        let finish: (Bool?, String) -> Void = { success, outcome in
+            CaptureRecoveryDiagnostics.shared.record(
+                "attempt_finished",
+                reason: reason,
+                success: success,
+                details: [
+                    "outcome": outcome,
+                    "durationMilliseconds":
+                        String(
+                            format: "%.1f",
+                            Date().timeIntervalSince(startedAt) * 1_000
+                        )
+                ]
+            )
+            completion()
+        }
+
         let dependencies = MacOSCaptureRecoveryDependencies(
             isConnected: { [weak self] in self?.isConnected == true },
             listInputs: { [weak self] completion in
@@ -1248,6 +1319,10 @@ class OBSWebSocketManager: ObservableObject {
         )
 
         MacOSCaptureRecoveryEngine.run(dependencies: dependencies) { [weak self] result in
+            guard let self else {
+                completion()
+                return
+            }
             switch result {
             case .notConnected:
                 CaptureRecoveryDiagnostics.shared.record(
@@ -1260,6 +1335,11 @@ class OBSWebSocketManager: ObservableObject {
                     .info,
                     "macOS capture recovery skipped: OBS WebSocket is disconnected (\(reason))"
                 )
+                UserNotifier.post(
+                    title: "OBScene: Capture refresh failed",
+                    body: "OBS disconnected before macOS Screen Capture could be checked."
+                )
+                finish(false, "websocket_disconnected")
             case .listFailed(let code, let comment):
                 let detail = [code.map(String.init), comment]
                     .compactMap { $0 }
@@ -1275,6 +1355,11 @@ class OBSWebSocketManager: ObservableObject {
                     .info,
                     "Could not list macOS capture sources\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
                 )
+                UserNotifier.post(
+                    title: "OBScene: Capture refresh failed",
+                    body: "OBS did not return its macOS Screen Capture sources."
+                )
+                finish(false, "input_list_failed")
             case .noInputs:
                 CaptureRecoveryDiagnostics.shared.record(
                     "no_screen_capture_inputs",
@@ -1285,172 +1370,482 @@ class OBSWebSocketManager: ObservableObject {
                     .info,
                     "No macOS Screen Capture inputs found (\(reason))"
                 )
+                UserNotifier.post(
+                    title: "OBScene: No capture source found",
+                    body: "OBS has no macOS Screen Capture source to reactivate."
+                )
+                finish(true, "no_screen_capture_inputs")
             case .completed(let entries):
-                for entry in entries {
-                    switch entry.outcome {
-                    case .reactivated:
-                        CaptureRecoveryDiagnostics.shared.record(
-                            "capture_reactivated",
-                            reason: reason,
-                            inputName: entry.inputName,
-                            responseCode: 100,
-                            success: true
-                        )
-                        ActivityLog.shared.log(
-                            .info,
-                            "Recovered stopped macOS capture '\(entry.inputName)' (\(reason))",
-                            userVisible: true
-                        )
-                    case .alreadyHealthy:
-                        CaptureRecoveryDiagnostics.shared.record(
-                            "reactivation_button_disabled",
-                            reason: reason,
-                            inputName: entry.inputName,
-                            responseCode:
-                                MacOSCaptureRecoveryEngine.alreadyHealthyCode,
-                            success: true,
-                            details: [
-                                "forcingReinitialize":
-                                    String(forceReinitializeWhenAlreadyHealthy)
-                            ]
-                        )
-                        if forceReinitializeWhenAlreadyHealthy {
-                            self?.forceReinitializeMacOSScreenCapture(
-                                inputName: entry.inputName,
-                                reason: reason
-                            )
-                        } else {
-                            ActivityLog.shared.log(
-                                .info,
-                                "macOS capture '\(entry.inputName)' has no enabled reactivation button (\(reason))"
-                            )
-                        }
-                    case .failed(let code, let comment):
-                        let detail = [code.map(String.init), comment]
-                            .compactMap { $0 }
-                            .joined(separator: ": ")
-                        CaptureRecoveryDiagnostics.shared.record(
-                            "capture_reactivation_failed",
-                            reason: reason,
-                            inputName: entry.inputName,
-                            responseCode: code,
-                            success: false,
-                            details: comment.map { ["comment": $0] } ?? [:]
-                        )
-                        ActivityLog.shared.log(
-                            .info,
-                            "Could not reactivate macOS capture '\(entry.inputName)'\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
-                        )
+                DispatchQueue.main.async {
+                    self.processMacOSCaptureRecoveryEntries(
+                        entries,
+                        index: 0,
+                        reason: reason
+                    ) {
+                        // Per-input events carry the authoritative success
+                        // value. Do not flatten a mixed multi-input result into
+                        // a misleading transaction-wide boolean.
+                        finish(nil, "input_results_recorded")
                     }
                 }
             }
         }
     }
 
-    /// Force OBS's ScreenCaptureKit source to rebuild even when its
-    /// `reactivate_capture` button is disabled.
-    ///
-    /// OBS 32.2.0 can initialize a missing display target as a black source
-    /// without setting `capture_failed`; that produces the same 604 response
-    /// as a genuinely healthy source. Its update callback also ignores
-    /// identical settings. Toggling `show_cursor` and restoring its original
-    /// value causes two bounded stream rebuilds while leaving the user's
-    /// persisted capture choice unchanged.
-    private func forceReinitializeMacOSScreenCapture(
-        inputName: String,
-        reason: String
+    private func processMacOSCaptureRecoveryEntries(
+        _ entries: [MacOSCaptureRecoveryEntry],
+        index: Int,
+        reason: String,
+        completion: @escaping () -> Void
     ) {
-        sendRequestWithStatus(
-            "GetInputSettings",
-            data: ["inputName": inputName]
-        ) { [weak self] response in
-            guard let self,
-                  let response,
-                  response.result,
-                  let data = response.responseData as? [String: Any],
-                  let settings = data["inputSettings"] as? [String: Any] else {
-                CaptureRecoveryDiagnostics.shared.record(
-                    "reinitialize_settings_read_failed",
+        guard index < entries.count else {
+            completion()
+            return
+        }
+
+        let entry = entries[index]
+        let advance = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else {
+                    completion()
+                    return
+                }
+                self.processMacOSCaptureRecoveryEntries(
+                    entries,
+                    index: index + 1,
                     reason: reason,
-                    inputName: inputName,
-                    responseCode: response?.code,
-                    success: false
+                    completion: completion
                 )
-                ActivityLog.shared.log(
-                    .info,
-                    "Could not read macOS capture settings for '\(inputName)' (\(reason))"
+            }
+        }
+
+        switch entry.outcome {
+        case .reactivated:
+            CaptureRecoveryDiagnostics.shared.record(
+                "capture_reactivated",
+                reason: reason,
+                inputName: entry.inputName,
+                responseCode: 100,
+                success: true
+            )
+            ActivityLog.shared.log(
+                .info,
+                "Recovered stopped macOS capture '\(entry.inputName)' (\(reason))",
+                userVisible: true
+            )
+            // OBS accepted its own native Reactivate Capture action. Give
+            // ScreenCaptureKit one bounded second to publish a frame before
+            // notifying the user of the verified result.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                [weak self] in
+                guard let self else {
+                    completion()
+                    return
+                }
+                self.assessMacOSScreenCaptureFrame(
+                    inputName: entry.inputName,
+                    reason: reason,
+                    phase: "after_native_reactivation"
+                ) { [weak self] health in
+                    guard let self else {
+                        completion()
+                        return
+                    }
+                    if health?.isVisiblyNonBlack == true {
+                        UserNotifier.post(
+                            title: "OBScene: Screen capture refreshed",
+                            body: "OBS reactivated '\(entry.inputName)' using its native Reactivate Capture action."
+                        )
+                        self.assessMacOSScreenCaptureScenePlacement(
+                            inputName: entry.inputName,
+                            reason: reason,
+                            completion: advance
+                        )
+                    } else {
+                        ActivityLog.shared.log(
+                            .info,
+                            "OBS accepted native reactivation for '\(entry.inputName)', but a visible frame was not verified (\(reason))",
+                            userVisible: true
+                        )
+                        UserNotifier.post(
+                            title: "OBScene: Capture still needs attention",
+                            body: "OBS accepted Reactivate Capture, but '\(entry.inputName)' still appears black or unavailable."
+                        )
+                        advance()
+                    }
+                }
+            }
+        case .buttonDisabled:
+            CaptureRecoveryDiagnostics.shared.record(
+                "reactivation_button_disabled",
+                reason: reason,
+                inputName: entry.inputName,
+                responseCode: MacOSCaptureRecoveryEngine.buttonDisabledCode,
+                details: [
+                    "checkingFrameForNotification": "true",
+                    "sourceSettingsMutationAllowed": "false"
+                ]
+            )
+            assessMacOSScreenCaptureFrame(
+                inputName: entry.inputName,
+                reason: reason,
+                phase: "native_button_disabled"
+            ) { [weak self] health in
+                guard let self else {
+                    completion()
+                    return
+                }
+                if health?.isVisiblyNonBlack == true {
+                    CaptureRecoveryDiagnostics.shared.record(
+                        "native_reactivation_not_needed",
+                        reason: reason,
+                        inputName: entry.inputName,
+                        success: true
+                    )
+                    ActivityLog.shared.log(
+                        .info,
+                        "macOS capture '\(entry.inputName)' is already producing frames; native Reactivate Capture was not needed (\(reason))"
+                    )
+                    UserNotifier.post(
+                        title: "OBScene: Screen capture already active",
+                        body: "'\(entry.inputName)' is producing frames; OBS did not need to reactivate it."
+                    )
+                    self.assessMacOSScreenCaptureScenePlacement(
+                        inputName: entry.inputName,
+                        reason: reason,
+                        completion: advance
+                    )
+                } else {
+                    CaptureRecoveryDiagnostics.shared.record(
+                        "native_reactivation_unavailable",
+                        reason: reason,
+                        inputName: entry.inputName,
+                        responseCode:
+                            MacOSCaptureRecoveryEngine.buttonDisabledCode,
+                        success: false,
+                        details: ["sourceSettingsChanged": "false"]
+                    )
+                    ActivityLog.shared.log(
+                        .info,
+                        "macOS capture '\(entry.inputName)' appears black or unavailable, but OBS did not enable its native Reactivate Capture action; no source settings were changed (\(reason))",
+                        userVisible: true
+                    )
+                    UserNotifier.post(
+                        title: "OBScene: Capture refresh unavailable",
+                        body: "'\(entry.inputName)' appears black, but OBS did not offer Reactivate Capture; no settings were changed."
+                    )
+                    advance()
+                }
+            }
+        case .failed(let code, let comment):
+            let detail = [code.map(String.init), comment]
+                .compactMap { $0 }
+                .joined(separator: ": ")
+            CaptureRecoveryDiagnostics.shared.record(
+                "capture_reactivation_failed",
+                reason: reason,
+                inputName: entry.inputName,
+                responseCode: code,
+                success: false,
+                details: comment.map { ["comment": $0] } ?? [:]
+            )
+            ActivityLog.shared.log(
+                .info,
+                "Could not reactivate macOS capture '\(entry.inputName)'\(detail.isEmpty ? "" : " (\(detail))") — \(reason)"
+            )
+            UserNotifier.post(
+                title: "OBScene: Capture refresh failed",
+                body: "OBS could not reactivate '\(entry.inputName)'\(detail.isEmpty ? "." : " (\(detail)).")"
+            )
+            advance()
+        }
+    }
+
+    /// A healthy capture source can still produce an apparently black program
+    /// canvas when its scene item is hidden or entirely outside the canvas.
+    /// Record that topology on the final wake/display check; do not rewrite
+    /// scene layout because off-canvas placement can be intentional.
+    private func assessMacOSScreenCaptureScenePlacement(
+        inputName: String,
+        reason: String,
+        completion: @escaping () -> Void
+    ) {
+        let startedAt = Date()
+
+        func recordUnavailable(
+            phase: String,
+            response: OBSRequestResultSnapshot?
+        ) {
+            var details = [
+                "phase": phase,
+                "durationMilliseconds":
+                    String(
+                        format: "%.1f",
+                        Date().timeIntervalSince(startedAt) * 1_000
+                    )
+            ]
+            if let comment = response?.comment {
+                details["comment"] = comment
+            }
+            CaptureRecoveryDiagnostics.shared.record(
+                "capture_scene_placement_unavailable",
+                reason: reason,
+                inputName: inputName,
+                responseCode: response?.code,
+                success: false,
+                details: details
+            )
+            completion()
+        }
+
+        sendRequestWithStatus("GetCurrentProgramScene") {
+            [weak self] sceneResponse in
+            guard let self else {
+                completion()
+                return
+            }
+            guard let sceneResponse,
+                  sceneResponse.result,
+                  let sceneData =
+                    sceneResponse.responseData as? [String: Any],
+                  let sceneName =
+                    sceneData["currentProgramSceneName"] as? String else {
+                recordUnavailable(
+                    phase: "current_program_scene",
+                    response: sceneResponse
                 )
                 return
             }
 
-            // OBS defaults show_cursor to true when the key is absent.
-            let originalShowCursor = settings["show_cursor"] as? Bool ?? true
-            let toggledShowCursor = !originalShowCursor
+            self.sendRequestWithStatus("GetVideoSettings") {
+                [weak self] videoResponse in
+                guard let self else {
+                    completion()
+                    return
+                }
+                guard let videoResponse,
+                      videoResponse.result,
+                      let videoData =
+                        videoResponse.responseData as? [String: Any],
+                      let canvasWidth =
+                        (videoData["baseWidth"] as? NSNumber)?.doubleValue,
+                      let canvasHeight =
+                        (videoData["baseHeight"] as? NSNumber)?.doubleValue
+                else {
+                    recordUnavailable(
+                        phase: "video_settings",
+                        response: videoResponse
+                    )
+                    return
+                }
 
-            self.sendRequestWithStatus(
-                "SetInputSettings",
-                data: [
-                    "inputName": inputName,
-                    "inputSettings": ["show_cursor": toggledShowCursor],
-                    "overlay": true
-                ]
-            ) { [weak self] toggleResponse in
-                guard let self else { return }
-
-                // Always issue the restore, even if OBS reported a failure for
-                // the toggle. This makes the original user preference the
-                // final requested state on every path.
                 self.sendRequestWithStatus(
-                    "SetInputSettings",
-                    data: [
-                        "inputName": inputName,
-                        "inputSettings": ["show_cursor": originalShowCursor],
-                        "overlay": true
-                    ]
-                ) { restoreResponse in
-                    if toggleResponse?.result == true
-                        && restoreResponse?.result == true {
+                    "GetSceneItemList",
+                    data: ["sceneName": sceneName]
+                ) { itemResponse in
+                    guard let itemResponse,
+                          itemResponse.result,
+                          let itemData =
+                            itemResponse.responseData as? [String: Any],
+                          let sceneItems =
+                            itemData["sceneItems"] as? [[String: Any]]
+                    else {
+                        recordUnavailable(
+                            phase: "scene_item_list",
+                            response: itemResponse
+                        )
+                        return
+                    }
+
+                    let matchingItems = sceneItems.filter {
+                        $0["sourceName"] as? String == inputName
+                    }
+                    guard !matchingItems.isEmpty else {
                         CaptureRecoveryDiagnostics.shared.record(
-                            "capture_reinitialized",
+                            "capture_not_in_program_scene",
                             reason: reason,
                             inputName: inputName,
-                            responseCode: restoreResponse?.code,
                             success: true,
                             details: [
-                                "cursorPreferenceRestored": "true",
-                                "toggleResponseCode":
-                                    toggleResponse.map { String($0.code) }
-                                    ?? "timeout"
+                                "sceneName": sceneName,
+                                "durationMilliseconds":
+                                    String(
+                                        format: "%.1f",
+                                        Date()
+                                            .timeIntervalSince(startedAt)
+                                            * 1_000
+                                    )
                             ]
                         )
-                        ActivityLog.shared.log(
-                            .info,
-                            "Reinitialized macOS capture '\(inputName)' (\(reason))"
-                        )
-                    } else {
-                        let toggleCode = toggleResponse
-                            .map { String($0.code) } ?? "timeout"
-                        let restoreCode = restoreResponse
-                            .map { String($0.code) } ?? "timeout"
+                        completion()
+                        return
+                    }
+
+                    for item in matchingItems {
+                        let itemID =
+                            (item["sceneItemId"] as? NSNumber)?.intValue
+                        let enabled =
+                            item["sceneItemEnabled"] as? Bool ?? false
+                        guard let transform =
+                                item["sceneItemTransform"]
+                                as? [String: Any],
+                              let placement =
+                                MacOSCaptureSceneItemPlacement.analyze(
+                                    transform: transform,
+                                    canvasWidth: canvasWidth,
+                                    canvasHeight: canvasHeight
+                                ) else {
+                            CaptureRecoveryDiagnostics.shared.record(
+                                "capture_scene_item_transform_unavailable",
+                                reason: reason,
+                                inputName: inputName,
+                                success: false,
+                                details: [
+                                    "sceneName": sceneName,
+                                    "sceneItemId":
+                                        itemID.map(String.init) ?? "unknown"
+                                ]
+                            )
+                            continue
+                        }
+
+                        let visibleOnCanvas =
+                            enabled && placement.intersectsCanvas
+                        let event: String
+                        if !enabled {
+                            event = "capture_scene_item_hidden"
+                        } else if !placement.intersectsCanvas {
+                            event = "capture_scene_item_off_canvas"
+                        } else {
+                            event = "capture_scene_item_on_canvas"
+                        }
                         CaptureRecoveryDiagnostics.shared.record(
-                            "capture_reinitialize_failed",
+                            event,
                             reason: reason,
                             inputName: inputName,
-                            responseCode: restoreResponse?.code,
-                            success: false,
+                            success: visibleOnCanvas,
                             details: [
-                                "cursorPreferenceRestoreRequested": "true",
-                                "toggleResponseCode": toggleCode,
-                                "restoreResponseCode": restoreCode
+                                "sceneName": sceneName,
+                                "sceneItemId":
+                                    itemID.map(String.init) ?? "unknown",
+                                "sceneItemEnabled": String(enabled),
+                                "positionX":
+                                    String(
+                                        format: "%.3f",
+                                        placement.positionX
+                                    ),
+                                "positionY":
+                                    String(
+                                        format: "%.3f",
+                                        placement.positionY
+                                    ),
+                                "width":
+                                    String(
+                                        format: "%.3f",
+                                        placement.width
+                                    ),
+                                "height":
+                                    String(
+                                        format: "%.3f",
+                                        placement.height
+                                    ),
+                                "alignment": String(placement.alignment),
+                                "canvasWidth":
+                                    String(format: "%.3f", canvasWidth),
+                                "canvasHeight":
+                                    String(format: "%.3f", canvasHeight),
+                                "intersectsCanvas":
+                                    String(placement.intersectsCanvas),
+                                "durationMilliseconds":
+                                    String(
+                                        format: "%.1f",
+                                        Date()
+                                            .timeIntervalSince(startedAt)
+                                            * 1_000
+                                    )
                             ]
                         )
-                        ActivityLog.shared.log(
-                            .info,
-                            "Could not fully reinitialize macOS capture '\(inputName)' (toggle \(toggleCode), restore \(restoreCode)) — \(reason)"
-                        )
+                        if enabled && !placement.intersectsCanvas {
+                            ActivityLog.shared.log(
+                                .info,
+                                "macOS capture '\(inputName)' is live but its item in '\(sceneName)' is outside the program canvas (\(reason))",
+                                userVisible: true
+                            )
+                        }
                     }
+                    completion()
                 }
             }
+        }
+    }
+
+    private func assessMacOSScreenCaptureFrame(
+        inputName: String,
+        reason: String,
+        phase: String,
+        completion: @escaping (MacOSCaptureScreenshotHealth?) -> Void
+    ) {
+        let startedAt = Date()
+        sendRequestWithStatus(
+            "GetSourceScreenshot",
+            data: [
+                "sourceName": inputName,
+                "imageFormat": "png",
+                "imageWidth": 160
+            ]
+        ) { response in
+            let durationMilliseconds =
+                Date().timeIntervalSince(startedAt) * 1_000
+            guard let response,
+                  response.result,
+                  let responseData =
+                    response.responseData as? [String: Any],
+                  let imageData = responseData["imageData"] as? String,
+                  let health =
+                    MacOSCaptureScreenshotHealth.analyze(dataURL: imageData)
+            else {
+                var details = [
+                    "phase": phase,
+                    "durationMilliseconds":
+                        String(format: "%.1f", durationMilliseconds)
+                ]
+                if let comment = response?.comment {
+                    details["comment"] = comment
+                }
+                CaptureRecoveryDiagnostics.shared.record(
+                    "capture_frame_unavailable",
+                    reason: reason,
+                    inputName: inputName,
+                    responseCode: response?.code,
+                    success: false,
+                    details: details
+                )
+                completion(nil)
+                return
+            }
+
+            CaptureRecoveryDiagnostics.shared.record(
+                "capture_frame_assessed",
+                reason: reason,
+                inputName: inputName,
+                responseCode: response.code,
+                success: health.isVisiblyNonBlack,
+                details: [
+                    "phase": phase,
+                    "durationMilliseconds":
+                        String(format: "%.1f", durationMilliseconds),
+                    "width": String(health.width),
+                    "height": String(health.height),
+                    "meanLuma": String(format: "%.3f", health.meanLuma),
+                    "nearBlackPixelRatio":
+                        String(
+                            format: "%.6f",
+                            health.nearBlackPixelRatio
+                        ),
+                    "sha256": health.sha256
+                ]
+            )
+            completion(health)
         }
     }
 

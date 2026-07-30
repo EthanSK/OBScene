@@ -941,11 +941,11 @@ struct SettingsView: View {
         ) {
             VStack(alignment: .leading, spacing: 7) {
                 Toggle(
-                    "Automatically recover OBS after wake/display changes",
+                    "Reactivate stopped OBS capture automatically",
                     isOn: $configStore.config
                         .automaticallyRecoverOBSAfterWakeAndDisplayChanges
                 )
-                Text("Repairs frozen macOS Screen Capture sources immediately and once more after 1 second for a display change or 2 seconds after wake. Also finishes profile, scene collection, and scene selections interrupted by sleep.")
+                Text("Off by default. When enabled, uses OBS's native Reactivate Capture action once 10 seconds after the last external display connects, 10 seconds after the Mac wakes or its lid opens, and 1 second after recording starts. Each result sends a macOS notification. It does not run on display removal, scene changes, or WebSocket reconnect, and never changes capture-source settings. This toggle also allows OBScene to finish profile, scene collection, and scene selections interrupted by sleep.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
