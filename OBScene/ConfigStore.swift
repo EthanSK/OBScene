@@ -319,6 +319,7 @@ enum TriggerActionKind: String, Codable, CaseIterable, Hashable {
     case replayBuffer = "replay_buffer"
     case refreshBrowsers = "refresh_browsers"
     case refreshOBSBrowserSources = "refresh_obs_browser_sources"
+    case refreshMacOSCaptureSource = "refresh_macos_capture_source"
 
     /// Human-readable label for Settings UI.
     var label: String {
@@ -329,6 +330,7 @@ enum TriggerActionKind: String, Codable, CaseIterable, Hashable {
         case .replayBuffer: return "Replay Buffer"
         case .refreshBrowsers: return "Refresh all browsers"
         case .refreshOBSBrowserSources: return "Refresh OBS browser sources"
+        case .refreshMacOSCaptureSource: return "Refresh macOS capture source"
         }
     }
 
@@ -341,6 +343,7 @@ enum TriggerActionKind: String, Codable, CaseIterable, Hashable {
         case .replayBuffer: return "memorychip"
         case .refreshBrowsers: return "arrow.clockwise"
         case .refreshOBSBrowserSources: return "arrow.clockwise.circle"
+        case .refreshMacOSCaptureSource: return "display.trianglebadge.exclamationmark"
         }
     }
 
@@ -349,14 +352,17 @@ enum TriggerActionKind: String, Codable, CaseIterable, Hashable {
     var supportsStop: Bool {
         switch self {
         case .recording, .streaming, .virtualCam, .replayBuffer: return true
-        case .refreshBrowsers, .refreshOBSBrowserSources: return false
+        case .refreshBrowsers, .refreshOBSBrowserSources,
+             .refreshMacOSCaptureSource:
+            return false
         }
     }
 
     /// Stable display order for the action rows.
     static let displayOrder: [TriggerActionKind] = [
         .recording, .streaming, .virtualCam, .replayBuffer,
-        .refreshBrowsers, .refreshOBSBrowserSources
+        .refreshBrowsers, .refreshOBSBrowserSources,
+        .refreshMacOSCaptureSource
     ]
 }
 
@@ -397,6 +403,42 @@ struct TriggerActionConfig: Codable, Equatable, Hashable, Identifiable {
         kind = try container.decode(TriggerActionKind.self, forKey: .kind)
         let decodedMode = try container.decodeIfPresent(TriggerActionMode.self, forKey: .mode) ?? .start
         mode = kind.supportsStop ? decodedMode : .start
+    }
+}
+
+/// Execution phases shared by the trigger runner and its regression tests.
+/// Stops settle first, one-shot/toggle actions prepare the scene next, and
+/// recording-family starts happen last so they capture the prepared state.
+enum TriggerActionExecutionPhase: Equatable {
+    case stop
+    case middle
+    case recordingStart
+}
+
+extension TriggerActionConfig {
+    var executionPhase: TriggerActionExecutionPhase {
+        switch kind {
+        case .recording, .streaming, .replayBuffer:
+            return mode == .start ? .recordingStart : .stop
+        case .virtualCam:
+            return mode == .start ? .middle : .stop
+        case .refreshBrowsers, .refreshOBSBrowserSources,
+             .refreshMacOSCaptureSource:
+            return .middle
+        }
+    }
+}
+
+enum TriggerActionExecutionPlan {
+    static func ordered(
+        _ actions: [TriggerActionConfig]
+    ) -> [TriggerActionConfig] {
+        let stops = actions.filter { $0.executionPhase == .stop }
+        let middles = actions.filter { $0.executionPhase == .middle }
+        let recordingStarts = actions.filter {
+            $0.executionPhase == .recordingStart
+        }
+        return stops + middles + recordingStarts
     }
 }
 
