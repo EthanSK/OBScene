@@ -47,6 +47,62 @@ struct AppConfigTests {
             fatalError("enabled dock-restoration toggle did not persist")
         }
 
-        print("AppConfig tests passed (6 tests)")
+        let triggerActionJSON = """
+        {
+          "kind": "refresh_macos_capture_source",
+          "mode": "stop"
+        }
+        """
+        let triggerAction = try decoder.decode(
+            TriggerActionConfig.self,
+            from: Data(triggerActionJSON.utf8)
+        )
+        guard triggerAction.kind == .refreshMacOSCaptureSource else {
+            fatalError("macOS capture refresh action kind was not decoded")
+        }
+        guard triggerAction.mode == .start else {
+            fatalError("macOS capture refresh must remain a one-shot action")
+        }
+
+        guard TriggerActionKind.displayOrder.contains(.refreshMacOSCaptureSource) else {
+            fatalError("macOS capture refresh is missing from Trigger Actions")
+        }
+
+        let actionEncoded = try JSONEncoder().encode(triggerAction)
+        let actionRoundTrip = try decoder.decode(
+            TriggerActionConfig.self,
+            from: actionEncoded
+        )
+        guard actionRoundTrip.kind == .refreshMacOSCaptureSource,
+              actionRoundTrip.mode == .start else {
+            fatalError("macOS capture refresh action did not persist")
+        }
+
+        guard triggerAction.executionPhase == .middle else {
+            fatalError("macOS capture refresh must be a middle-phase action")
+        }
+
+        let startRecording = TriggerActionConfig(
+            kind: .recording,
+            mode: .start
+        )
+        let stopStreaming = TriggerActionConfig(
+            kind: .streaming,
+            mode: .stop
+        )
+        let ordered = TriggerActionExecutionPlan.ordered([
+            startRecording,
+            triggerAction,
+            stopStreaming
+        ])
+        guard ordered.map(\.kind) == [
+            .streaming,
+            .refreshMacOSCaptureSource,
+            .recording
+        ] else {
+            fatalError("macOS capture refresh was not ordered before recording")
+        }
+
+        print("AppConfig tests passed (12 tests)")
     }
 }

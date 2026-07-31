@@ -526,6 +526,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 case .replayBuffer: actions.insert(action.mode == .start ? "Replay Buffer" : "Stop Replay")
                 case .refreshBrowsers, .refreshOBSBrowserSources:
                     break
+                case .refreshMacOSCaptureSource:
+                    actions.insert("Refresh Capture")
                 }
             }
         }
@@ -958,6 +960,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return "Refreshed browser tabs"
             case .refreshOBSBrowserSources:
                 return "Refreshed OBS browser sources"
+            case .refreshMacOSCaptureSource:
+                return "Refreshed macOS capture source"
             }
         }
     }
@@ -1046,7 +1050,12 @@ extension AppDelegate {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         let renderWidth: CGFloat = 980
-        let renderHeight: CGFloat = 720
+        let requestedRenderHeight = ProcessInfo.processInfo.environment[
+            "OBSCENE_RENDER_SETTINGS_HEIGHT"
+        ].flatMap(Double.init)
+        let renderHeight = CGFloat(
+            min(max(requestedRenderHeight ?? 720, 720), 1_600)
+        )
         let view = SettingsView()
             .environmentObject(configStore)
             .environmentObject(obsManager)

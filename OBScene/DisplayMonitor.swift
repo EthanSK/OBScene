@@ -1022,6 +1022,15 @@ class DisplayMonitor {
                     // saved configs still work. Bug fix 2026-04-21.
                     ActivityLog.shared.log(.info, "Refreshing OBS browser sources")
                     obs.refreshAllBrowserSources()
+                case .refreshMacOSCaptureSource:
+                    ActivityLog.shared.log(
+                        .info,
+                        "Refreshing macOS capture source (\(profile.name))",
+                        userVisible: true
+                    )
+                    obs.reactivateStoppedMacOSScreenCaptures(
+                        reason: "trigger action: \(profile.name)"
+                    )
                 }
             }
 
@@ -1038,25 +1047,9 @@ class DisplayMonitor {
             // Within each bucket we preserve the user's relative order, and
             // the stagger index for `delayBetweenActions` is the new flat
             // position (not per-bucket), so the counter is not reset.
-            enum ActionBucket { case stop, middle, recordingStart }
-            func bucket(for action: TriggerActionConfig) -> ActionBucket {
-                switch action.kind {
-                case .recording, .streaming, .replayBuffer:
-                    return action.mode == .start ? .recordingStart : .stop
-                case .virtualCam:
-                    // Virtual cam isn't a "capture to disk / to wire" action,
-                    // so treat its start as a middle-bucket toggle and its
-                    // stop like any other stop.
-                    return action.mode == .start ? .middle : .stop
-                case .refreshBrowsers, .refreshOBSBrowserSources:
-                    return .middle
-                }
-            }
-
-            let stops = profile.actions.filter { bucket(for: $0) == .stop }
-            let middles = profile.actions.filter { bucket(for: $0) == .middle }
-            let recordingStarts = profile.actions.filter { bucket(for: $0) == .recordingStart }
-            let orderedActions = stops + middles + recordingStarts
+            let orderedActions = TriggerActionExecutionPlan.ordered(
+                profile.actions
+            )
 
             if betweenDelay == 0 {
                 // Back-compat path: preserve the historical behaviour where
@@ -1071,6 +1064,8 @@ class DisplayMonitor {
                         fire(action)
                     case .refreshBrowsers, .refreshOBSBrowserSources:
                         break
+                    case .refreshMacOSCaptureSource:
+                        fire(action)
                     }
                 }
 

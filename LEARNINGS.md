@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-31T12:58:12Z
+**Trigger:** User decided the native macOS capture refresh was useful after all, but wanted it as an ordinary opt-in action on each trigger profile
+**Symptom:** OBScene v1.57 offered a manual menu command and a separate global automatic-recovery toggle, but no profile-scoped checkbox that could refresh capture only for a chosen display or USB trigger.
+**Root cause:** `TriggerActionKind` modeled browser refreshes but did not model the existing serialized `reactivateStoppedMacOSScreenCaptures(reason:)` operation.
+**Fix:** Add the one-shot **Refresh macOS capture source** action to every profile's Trigger Actions checklist. Execute it in the middle action bucket through the existing serialized native-only recovery gate, before recording-family starts, and preserve the global wake/display/recording automation as a separate off-by-default opt-in.
+**Guard:** AppConfig tests must prove the new raw value decodes, coerces an invalid stop mode to one-shot start, appears in `displayOrder`, round-trips, and is ordered before recording-family starts. The full focused suite, universal build, exhaustive-switch compilation, source audit, and an expanded-height offscreen Trigger Actions render must pass; never replace this action with source-setting mutation, OBS restart, or an implicit default action.
+---
+
+---
 **Date:** 2026-07-30T12:02:33Z
 **Trigger:** User asked for a menu-bar command to refresh macOS capture manually while automatic capture recovery remains disabled
 **Symptom:** The safe native `reactivate_capture` transaction existed only behind automatic wake, display-connect, and recording-start triggers. After those triggers were disabled, there was no user-invoked recovery path in the menu-bar dropdown.
