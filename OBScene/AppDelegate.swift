@@ -449,10 +449,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let checkForUpdatesItem = NSMenuItem(
             title: "Check for Updates…",
-            action: #selector(UpdaterManager.checkForUpdates(_:)),
+            action: #selector(checkForUpdatesFromMenu),
             keyEquivalent: ""
         )
-        checkForUpdatesItem.target = UpdaterManager.shared
+        checkForUpdatesItem.target = self
         menu.addItem(checkForUpdatesItem)
 
         let githubItem = NSMenuItem(title: "OBScene on GitHub", action: #selector(openGitHub), keyEquivalent: "")
@@ -805,6 +805,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func runFileTransfersNow() {
         fileTransferManager.runNow()
+    }
+
+    /// A status-item menu does not activate an LSUIElement application when
+    /// one of its actions is chosen. Sparkle can therefore create its update
+    /// alert behind the currently active app, making the click look like it
+    /// did nothing. Wait for menu tracking to end, activate OBScene, and then
+    /// invoke the same interactive Sparkle flow used elsewhere in the app.
+    /// Activating first also re-surfaces an already-open Sparkle alert when an
+    /// update check is currently in progress.
+    @objc private func checkForUpdatesFromMenu() {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            UpdaterManager.shared.checkForUpdates(nil)
+        }
     }
 
     @objc private func showAbout() {
