@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-07-31T13:49:04Z
+**Trigger:** User reported that **Check for Updates…** worked from Settings but appeared to do nothing from the menu-bar dropdown
+**Symptom:** Sparkle created its update alert, but selecting the status-item command could leave that alert out of sight behind the currently active app. Opening Settings made the updater appear to work because that path explicitly activated OBScene first.
+**Root cause:** OBScene is an `LSUIElement` menu-bar app. A status-item action does not activate the application, and the menu wired directly to `UpdaterManager.checkForUpdates(_:)` without waiting for menu tracking to finish or calling `NSApp.activate(ignoringOtherApps:)`.
+**Fix:** Route the menu item through `AppDelegate.checkForUpdatesFromMenu()`. On the next main-queue turn, activate OBScene and then invoke the existing interactive Sparkle check. This also brings an already-open Sparkle alert forward when a check is busy instead of making another click look inert.
+**Guard:** Keep the menu target on `AppDelegate`, retain the next-run-loop dispatch before activation, and compile the full app in addition to running all focused tests. For live verification, distinguish an updater alert that exists but is not frontmost from a check that never started; the app-control bridge may not attach to a windowless `LSUIElement` process, so do not claim a status-item click was exercised unless the actual click was observed.
+---
+
+---
 **Date:** 2026-07-31T12:58:12Z
 **Trigger:** User decided the native macOS capture refresh was useful after all, but wanted it as an ordinary opt-in action on each trigger profile
 **Symptom:** OBScene v1.57 offered a manual menu command and a separate global automatic-recovery toggle, but no profile-scoped checkbox that could refresh capture only for a chosen display or USB trigger.
