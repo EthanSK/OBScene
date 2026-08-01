@@ -1,6 +1,28 @@
 import SwiftUI
 import ServiceManagement
 import AppKit
+import UniformTypeIdentifiers
+
+private struct ProfileTabDropDelegate: DropDelegate {
+    let targetProfileID: UUID
+    @Binding var draggedProfileID: UUID?
+    let moveProfile: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedProfileID,
+              draggedProfileID != targetProfileID else { return }
+        moveProfile(draggedProfileID, targetProfileID)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedProfileID = nil
+        return true
+    }
+}
 
 struct SettingsView: View {
     private enum SettingsSection: String, CaseIterable, Identifiable {
@@ -20,6 +42,7 @@ struct SettingsView: View {
     @State private var obsPassword: String = ""
     @State private var isConnecting = false
     @State private var settingsSection: SettingsSection = .obsAutomation
+    @State private var draggedProfileID: UUID?
 
     @State private var launchAtLogin: Bool = ProcessInfo.processInfo.environment["OBSCENE_RENDER_SETTINGS"] != nil
     @State private var launchAtLoginError: String? = nil
@@ -373,6 +396,19 @@ struct SettingsView: View {
         .onTapGesture {
             configStore.config.selectedProfileIndex = index
         }
+        .onDrag {
+            draggedProfileID = profile.id
+            return NSItemProvider(object: profile.id.uuidString as NSString)
+        }
+        .onDrop(
+            of: [UTType.plainText],
+            delegate: ProfileTabDropDelegate(
+                targetProfileID: profile.id,
+                draggedProfileID: $draggedProfileID,
+                moveProfile: moveProfile
+            )
+        )
+        .help("Click to select. Drag to reorder this profile.")
     }
 
     /// Safe index that clamps to valid range.
@@ -423,33 +459,22 @@ struct SettingsView: View {
 
     private func profileNameAndTriggerType(profile: Binding<TriggerProfile>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                HStack(spacing: 4) {
-                    Text("Name:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("Profile name", text: profile.name)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 160)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    profileNameControl(profile: profile)
+                    profileTriggerControl(profile: profile)
+                    profileEnabledControl(profile: profile)
+                    Spacer(minLength: 0)
                 }
 
-                HStack(spacing: 4) {
-                    Text("Trigger:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Picker("", selection: profile.triggerType) {
-                        ForEach(TriggerProfile.TriggerType.allCases, id: \.self) { type in
-                            Label(type.label, systemImage: type.symbol).tag(type)
-                        }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        profileNameControl(profile: profile)
+                        Spacer(minLength: 0)
+                        profileEnabledControl(profile: profile)
                     }
-                    .frame(width: 190)
+                    profileTriggerControl(profile: profile)
                 }
-
-                Toggle("Enabled", isOn: profile.isEnabled)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                Spacer()
             }
 
             if profile.wrappedValue.triggerType == .wake {
@@ -467,6 +492,7 @@ struct SettingsView: View {
                     Text("Mode:")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                     Picker("", selection: profile.mode) {
                         ForEach(ProfileTriggerMode.allCases, id: \.self) { m in
                             Label(m.label, systemImage: m.symbol).tag(m)
@@ -487,6 +513,48 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private func profileNameControl(
+        profile: Binding<TriggerProfile>
+    ) -> some View {
+        HStack(spacing: 4) {
+            Text("Name:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: true, vertical: false)
+            TextField("Profile name", text: profile.name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func profileTriggerControl(
+        profile: Binding<TriggerProfile>
+    ) -> some View {
+        HStack(spacing: 4) {
+            Text("Trigger:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: true, vertical: false)
+            Picker("", selection: profile.triggerType) {
+                ForEach(TriggerProfile.TriggerType.allCases, id: \.self) { type in
+                    Label(type.label, systemImage: type.symbol).tag(type)
+                }
+            }
+            .frame(width: 190)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func profileEnabledControl(
+        profile: Binding<TriggerProfile>
+    ) -> some View {
+        Toggle("Enabled", isOn: profile.isEnabled)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     @ViewBuilder
@@ -513,13 +581,13 @@ struct SettingsView: View {
 
                 HStack {
                     Text("Delay between actions:")
-                    TextField("0", value: profile.delayBetweenActions, formatter: Self.delayBetweenActionsFormatter)
+                    TextField("2", value: profile.delayBetweenActions, formatter: Self.delayBetweenActionsFormatter)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 60)
                     Text("seconds")
                     Spacer()
                 }
-                Text("Seconds between each action when the profile fires. Leave at 0 to fire them all at once.")
+                Text("New profiles default to 2 seconds between actions. Set 0 to fire them all at once.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -897,6 +965,28 @@ struct SettingsView: View {
         if configStore.config.selectedProfileIndex >= configStore.config.profiles.count {
             configStore.config.selectedProfileIndex = max(0, configStore.config.profiles.count - 1)
         }
+    }
+
+    private func moveProfile(_ draggedID: UUID, over targetID: UUID) {
+        var config = configStore.config
+        let selectedProfileID = config.profiles.indices.contains(
+            config.selectedProfileIndex
+        ) ? config.profiles[config.selectedProfileIndex].id : config.profiles.first?.id
+        let reordered = ProfileOrdering.moving(
+            config.profiles,
+            draggedID: draggedID,
+            over: targetID
+        )
+        guard reordered != config.profiles else { return }
+
+        config.profiles = reordered
+        if let selectedProfileID,
+           let selectedIndex = reordered.firstIndex(where: {
+               $0.id == selectedProfileID
+           }) {
+            config.selectedProfileIndex = selectedIndex
+        }
+        configStore.config = config
     }
 
     // MARK: - Section views

@@ -24,6 +24,14 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-08-01T13:25:49Z
+**Trigger:** User reported the v1.60 Settings header was visibly broken and requested drag-reorderable profile tabs plus a 2-second default action gap
+**Symptom:** At the user's narrower Settings width, the `Trigger:` label collapsed into one character per line between the profile name and the fixed-width trigger picker. Profile tabs could not be reordered, and newly created profiles fired actions simultaneously by default.
+**Root cause:** The profile header put a flexible text label beside a 190-point picker in one compressible `HStack`, while release visual QA rendered only the 980-point default window and never exercised the 640-point minimum or the narrower left pane of the two-column layout. Profile order had no drag/drop mutation path, and `TriggerProfile.delayBetweenActions` still initialized to 0.
+**Fix:** Make the header choose between a fixed-label horizontal layout and a compact two-row layout with `ViewThatFits`; add persistent ID-based profile-tab drag/drop while preserving the selected profile; default genuinely new profiles to a 2-second action gap while decoding/migrating older saved profiles at 0; and add configurable offscreen Settings widths.
+**Guard:** `AGENTS.md` now requires built, inspected Settings screenshots at 640, 760, and 980 points for every UI change. AppConfig tests prove forward/backward/end/self drag ordering, JSON order persistence, a 2-second fresh-profile default, explicit 0 round-trip, and 0-second compatibility for older saved and migrated profiles.
+
+---
 **Date:** 2026-08-01T12:04:15Z
 **Trigger:** User wanted a configurable lid-open trigger because display and USB edges did not map cleanly to post-sleep capture repair
 **Symptom:** OBScene observed system wake only for the separate global recovery feature; a normal Trigger Profile could not use wake/lid-open to run its selected actions.

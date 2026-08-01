@@ -576,9 +576,11 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
 
     /// Delay (seconds) between successive actions when the profile fires. The
     /// first action fires immediately; each subsequent action is offset by
-    /// `index * delayBetweenActions`. Defaults to 0 so existing profiles keep
-    /// their original all-at-once behaviour.
-    var delayBetweenActions: Double = 0.0
+    /// `index * delayBetweenActions`. New profiles default to 2 seconds so
+    /// several OBS actions are not fired in one burst. The custom decoder
+    /// keeps profiles saved by older releases at their historical 0-second
+    /// value when this key is absent.
+    var delayBetweenActions: Double = 2.0
 
     /// Optional shell command to run when this profile activates (immediately
     /// before the OBS actions fire). Runs detached under the user's login
@@ -681,7 +683,10 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
         refreshOBSBrowserSourcesOnTrigger = try container.decodeIfPresent(Bool.self, forKey: .refreshOBSBrowserSourcesOnTrigger) ?? refreshOBSBrowserSourcesOnTrigger
         migratedToModeSchema = try container.decodeIfPresent(Bool.self, forKey: .migratedToModeSchema) ?? migratedToModeSchema
         triggerDelay = try container.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? triggerDelay
-        delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? delayBetweenActions
+        // `delayBetweenActions` did not exist in early saved profiles. Keep
+        // those profiles at the historical all-at-once value while allowing
+        // genuinely new TriggerProfile() values to use the 2-second default.
+        delayBetweenActions = try container.decodeIfPresent(Double.self, forKey: .delayBetweenActions) ?? 0.0
         runScript = try container.decodeIfPresent(String.self, forKey: .runScript) ?? runScript
         restartOBSBeforeRun = try container.decodeIfPresent(Bool.self, forKey: .restartOBSBeforeRun) ?? restartOBSBeforeRun
         runScriptBeforeRestart = try container.decodeIfPresent(Bool.self, forKey: .runScriptBeforeRestart) ?? runScriptBeforeRestart
@@ -696,6 +701,31 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// True if the profile has any configured action.
     var hasAnyAction: Bool {
         return !actions.isEmpty
+    }
+}
+
+/// Pure profile-tab ordering used by the SwiftUI drag/drop delegate. Keeping
+/// the mutation independent of the view lets us prove ordering semantics and
+/// makes persistence automatic through ConfigStore's normal config save.
+enum ProfileOrdering {
+    static func moving(
+        _ profiles: [TriggerProfile],
+        draggedID: UUID,
+        over targetID: UUID
+    ) -> [TriggerProfile] {
+        guard draggedID != targetID,
+              let sourceIndex = profiles.firstIndex(where: { $0.id == draggedID }),
+              let targetIndex = profiles.firstIndex(where: { $0.id == targetID }) else {
+            return profiles
+        }
+
+        var reordered = profiles
+        let draggedProfile = reordered.remove(at: sourceIndex)
+        reordered.insert(
+            draggedProfile,
+            at: min(targetIndex, reordered.count)
+        )
+        return reordered
     }
 }
 
@@ -868,6 +898,9 @@ struct AppConfig: Codable, Equatable {
             return
         }
         var profile = TriggerProfile()
+        // This profile represents a pre-delay installation, so preserve the
+        // old simultaneous-action behavior during the one-time migration.
+        profile.delayBetweenActions = 0
         profile.name = "Displays"
         profile.triggerType = .display
         profile.requiredExternalDisplays = requiredExternalDisplays
