@@ -24,6 +24,14 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-08-01T12:04:15Z
+**Trigger:** User wanted a configurable lid-open trigger because display and USB edges did not map cleanly to post-sleep capture repair
+**Symptom:** OBScene observed system wake only for the separate global recovery feature; a normal Trigger Profile could not use wake/lid-open to run its selected actions.
+**Root cause:** `TriggerProfile.TriggerType` modeled only external displays and USB devices even though `DisplayMonitor` already owned an `NSWorkspace.didWakeNotification` observer.
+**Fix:** Add **Wake / Lid Open** as a first-class profile trigger. On each real system wake, select only enabled wake profiles and schedule them through the existing delayed profile/action pipeline. Wake profiles have no plug-in/plug-out mode UI; they retain that persisted field only so trigger-type edits remain lossless. Login is not used because it would miss later ordinary lid-open events.
+**Guard:** AppConfig tests decode and round-trip the new raw value and prove the pure wake policy selects only enabled wake profiles. Keep real sleep/lid testing manual because automating sleep would disrupt the user's live Mac. The existing global wake/display recovery remains a separate off-by-default option; avoid configuring both it and a wake profile with the same capture-refresh action unless duplicate attempts are intentional.
+
+---
 **Date:** 2026-07-31T13:49:04Z
 **Trigger:** User reported that **Check for Updates…** worked from Settings but appeared to do nothing from the menu-bar dropdown
 **Symptom:** Sparkle created its update alert, but selecting the status-item command could leave that alert out of sight behind the currently active app. Opening Settings made the updater appear to work because that path explicitly activated OBScene first.

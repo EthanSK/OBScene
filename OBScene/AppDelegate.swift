@@ -897,11 +897,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 switch p.triggerType {
                 case .display:   eventType = .displayPlugIn
                 case .usbDevice: eventType = .usbPlugIn
+                case .wake:      eventType = .wake
                 }
                 LastTriggerStore.shared.record(profile: p, eventType: eventType)
             }
 
-            var parts: [String] = ["Profile: \(profileName) (\(profile?.mode.shortLabel ?? "plug in"))\(simTag)"]
+            var parts: [String] = ["Profile: \(profileName) (\(profile?.triggerEventShortLabel ?? "trigger"))\(simTag)"]
             if let p = profile {
                 if !p.selectedSceneCollection.isEmpty {
                     parts.append("Collection → \(p.selectedSceneCollection)")
@@ -938,6 +939,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 switch p.triggerType {
                 case .display:   eventType = .displayPlugOut
                 case .usbDevice: eventType = .usbPlugOut
+                case .wake:      eventType = .wake
                 }
                 LastTriggerStore.shared.record(profile: p, eventType: eventType)
             }
@@ -1047,6 +1049,36 @@ extension AppDelegate {
     /// Offscreen render of the `SettingsView` at its natural content size,
     /// used by the release screenshot tooling (`OBSCENE_RENDER_SETTINGS=path`).
     fileprivate func renderSettingsToPNG(path: String) {
+        var previewConfig = configStore.config
+        if ProcessInfo.processInfo.environment[
+            "OBSCENE_RENDER_WAKE_PROFILE"
+        ] == "1" {
+            if previewConfig.profiles.isEmpty {
+                previewConfig.profiles = [TriggerProfile()]
+            }
+            let index = min(
+                max(previewConfig.selectedProfileIndex, 0),
+                previewConfig.profiles.count - 1
+            )
+            previewConfig.selectedProfileIndex = index
+            previewConfig.profiles[index].name = "Repair capture after wake"
+            previewConfig.profiles[index].triggerType = .wake
+            previewConfig.profiles[index].triggerDelay = 10
+            previewConfig.profiles[index].delayBetweenActions = 0
+            previewConfig.profiles[index].runScript = ""
+            previewConfig.profiles[index].restartOBSBeforeRun = false
+            previewConfig.profiles[index].runScriptBeforeRestart = false
+            previewConfig.profiles[index].actions = [
+                TriggerActionConfig(
+                    kind: .refreshMacOSCaptureSource,
+                    mode: .start
+                )
+            ]
+        }
+        // Render against an isolated store so visual QA can never rewrite the
+        // user's persisted profiles, even when the preview needs demo data.
+        let previewStore = ConfigStore(previewConfig: previewConfig)
+
         obsManager.isConnected = true
         obsManager.sceneCollections = ["Untitled"]
         obsManager.profiles = ["Untitled"]
@@ -1071,7 +1103,7 @@ extension AppDelegate {
             min(max(requestedRenderHeight ?? 720, 720), 1_600)
         )
         let view = SettingsView()
-            .environmentObject(configStore)
+            .environmentObject(previewStore)
             .environmentObject(obsManager)
             .frame(width: renderWidth, height: renderHeight)
             .background(Color(NSColor.windowBackgroundColor))

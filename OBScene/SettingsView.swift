@@ -442,7 +442,7 @@ struct SettingsView: View {
                             Label(type.label, systemImage: type.symbol).tag(type)
                         }
                     }
-                    .frame(width: 160)
+                    .frame(width: 190)
                 }
 
                 Toggle("Enabled", isOn: profile.isEnabled)
@@ -452,27 +452,39 @@ struct SettingsView: View {
                 Spacer()
             }
 
-            HStack(spacing: 6) {
-                Text("Mode:")
+            if profile.wrappedValue.triggerType == .wake {
+                HStack(spacing: 6) {
+                    Label(
+                        "Fires once whenever macOS wakes, including a normal lid open.",
+                        systemImage: "sunrise"
+                    )
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Picker("", selection: profile.mode) {
-                    ForEach(ProfileTriggerMode.allCases, id: \.self) { m in
-                        Label(m.label, systemImage: m.symbol).tag(m)
-                    }
+                    Spacer()
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 280)
+            } else {
+                HStack(spacing: 6) {
+                    Text("Mode:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: profile.mode) {
+                        ForEach(ProfileTriggerMode.allCases, id: \.self) { m in
+                            Label(m.label, systemImage: m.symbol).tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 280)
 
-                Text(profile.wrappedValue.mode == .plugIn
-                     ? "Fires when the trigger condition becomes true."
-                     : "Fires when the trigger condition stops being true.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    Text(profile.wrappedValue.mode == .plugIn
+                         ? "Fires when the trigger condition becomes true."
+                         : "Fires when the trigger condition stops being true.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
-                Spacer()
+                    Spacer()
+                }
             }
         }
     }
@@ -481,10 +493,13 @@ struct SettingsView: View {
     private func triggerSettingsGroup(profile: Binding<TriggerProfile>) -> some View {
         GroupBox(label: Label("Trigger Settings", systemImage: profile.wrappedValue.triggerType.symbol)) {
             VStack(alignment: .leading, spacing: 8) {
-                if profile.wrappedValue.triggerType == .display {
+                switch profile.wrappedValue.triggerType {
+                case .display:
                     displayTriggerSettings(profile: profile)
-                } else {
+                case .usbDevice:
                     usbTriggerSettings(profile: profile)
+                case .wake:
+                    wakeTriggerSettings(profile: profile)
                 }
 
                 HStack {
@@ -575,6 +590,38 @@ struct SettingsView: View {
                 Text("\(DisplayMonitor.shared.externalDisplayCount)")
                     .fontWeight(.medium)
                 Spacer()
+            }
+        }
+    }
+
+    private func wakeTriggerSettings(
+        profile: Binding<TriggerProfile>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Uses macOS's system-wake event, so it covers the usual lid-close → sleep → lid-open flow without waiting for login.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("For macOS Screen Capture recovery, use a 10-second trigger delay and enable Refresh macOS capture source below so the display topology can settle first.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("That refresh action affects ScreenCaptureKit only; it does not reset USB/HDMI Video Capture Device sources.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if configStore.config
+                .automaticallyRecoverOBSAfterWakeAndDisplayChanges,
+               profile.wrappedValue.actions.contains(where: {
+                   $0.kind == .refreshMacOSCaptureSource
+               }) {
+                Label(
+                    "The global automatic capture recovery is also enabled, so this profile would request the same wake refresh twice.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundColor(.orange)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -759,7 +806,7 @@ struct SettingsView: View {
     }
 
     private func triggerActionsGroup(profile: Binding<TriggerProfile>) -> some View {
-        let modeShort = profile.wrappedValue.mode.shortLabel
+        let modeShort = profile.wrappedValue.triggerEventShortLabel
         return GroupBox(
             label: Label("Trigger Actions (on \(modeShort))", systemImage: "bolt.fill")
         ) {

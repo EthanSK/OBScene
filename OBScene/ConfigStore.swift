@@ -208,6 +208,7 @@ struct LastTriggerRecord: Codable, Equatable {
         case displayPlugOut = "display_plug_out"
         case usbPlugIn = "usb_plug_in"
         case usbPlugOut = "usb_plug_out"
+        case wake = "wake"
 
         var label: String {
             switch self {
@@ -215,6 +216,7 @@ struct LastTriggerRecord: Codable, Equatable {
             case .displayPlugOut: return "display plug-out"
             case .usbPlugIn: return "USB plug-in"
             case .usbPlugOut: return "USB plug-out"
+            case .wake: return "wake / lid open"
             }
         }
     }
@@ -476,10 +478,11 @@ enum ProfileTriggerMode: String, Codable, CaseIterable, Hashable {
 
 // MARK: - Trigger Profile
 
-/// A single trigger profile. Each profile has its own trigger type (display or
-/// USB device), a mode (plug-in / plug-out), OBS configuration (scene
-/// collection, profile, scene), and trigger actions. Multiple profiles can be
-/// active simultaneously.
+/// A single trigger profile. Each profile has its own trigger type (display,
+/// USB device, or wake/lid-open), OBS configuration (scene collection,
+/// profile, scene), and trigger actions. Hardware profiles also have a mode
+/// (plug-in / plug-out); wake profiles fire once per system wake. Multiple
+/// profiles can be active simultaneously.
 struct TriggerProfile: Codable, Equatable, Identifiable {
     var id: UUID = UUID()
     var name: String = "New Profile"
@@ -489,11 +492,13 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     enum TriggerType: String, Codable, CaseIterable {
         case display = "display"
         case usbDevice = "usb_device"
+        case wake = "wake"
 
         var label: String {
             switch self {
             case .display: return "External Display"
             case .usbDevice: return "USB Device"
+            case .wake: return "Wake / Lid Open"
             }
         }
 
@@ -501,11 +506,25 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
             switch self {
             case .display: return "display.2"
             case .usbDevice: return "cable.connector"
+            case .wake: return "sunrise"
             }
         }
     }
 
     var triggerType: TriggerType = .display
+
+    /// Short description of the event that fires this profile. Wake profiles
+    /// have no plug-in / plug-out edge, but retain the persisted `mode` field
+    /// so changing an existing profile's trigger type is lossless.
+    var triggerEventShortLabel: String {
+        triggerType == .wake ? "wake" : mode.shortLabel
+    }
+
+    /// Whether the firing should be surfaced through the plug-out notification
+    /// path. Wake deliberately ignores a retained legacy mode value.
+    var usesPlugOutSemantics: Bool {
+        triggerType != .wake && mode == .plugOut
+    }
 
     /// Whether this profile fires on plug-in or plug-out. Defaults to plug-in
     /// for newly-created profiles.
@@ -677,6 +696,18 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// True if the profile has any configured action.
     var hasAnyAction: Bool {
         return !actions.isEmpty
+    }
+}
+
+/// Pure selection policy for the system-wake event. Keeping this separate
+/// from AppKit's notification callback makes it possible to prove that only
+/// enabled wake profiles fire, while display and USB profiles remain owned by
+/// their existing hardware-edge monitors.
+enum WakeTriggerPolicy {
+    static func profilesToFire(
+        from profiles: [TriggerProfile]
+    ) -> [TriggerProfile] {
+        profiles.filter { $0.isEnabled && $0.triggerType == .wake }
     }
 }
 
