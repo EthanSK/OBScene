@@ -5,6 +5,41 @@ struct AppConfigTests {
     static func main() throws {
         let decoder = JSONDecoder()
 
+        guard TriggerProfile().delayBetweenActions == 2 else {
+            fatalError("new profiles must default to a 2-second action delay")
+        }
+
+        let legacyProfile = try decoder.decode(
+            TriggerProfile.self,
+            from: Data("{\"name\":\"Legacy\"}".utf8)
+        )
+        guard legacyProfile.delayBetweenActions == 0 else {
+            fatalError("saved profiles missing the delay key must retain 0 seconds")
+        }
+
+        var explicitZeroDelayProfile = TriggerProfile()
+        explicitZeroDelayProfile.delayBetweenActions = 0
+        let zeroDelayRoundTrip = try decoder.decode(
+            TriggerProfile.self,
+            from: JSONEncoder().encode(explicitZeroDelayProfile)
+        )
+        guard zeroDelayRoundTrip.delayBetweenActions == 0 else {
+            fatalError("an explicit 0-second action delay did not persist")
+        }
+
+        var freshConfig = AppConfig()
+        freshConfig.migrateToProfilesIfNeeded()
+        guard freshConfig.profiles.first?.delayBetweenActions == 2 else {
+            fatalError("the fresh-install profile must default to 2 seconds")
+        }
+
+        var preDelayConfig = AppConfig()
+        preDelayConfig.hasBeenConfigured = true
+        preDelayConfig.migrateToProfilesIfNeeded()
+        guard preDelayConfig.profiles.first?.delayBetweenActions == 0 else {
+            fatalError("a migrated pre-delay configuration must retain 0 seconds")
+        }
+
         let legacy = try decoder.decode(AppConfig.self, from: Data("{}".utf8))
         guard !legacy.automaticallyRecoverOBSAfterWakeAndDisplayChanges else {
             fatalError("missing recovery toggle must default to disabled")
@@ -147,6 +182,59 @@ struct AppConfigTests {
             fatalError("wake profile did not persist")
         }
 
-        print("AppConfig tests passed (15 tests)")
+        var profileA = TriggerProfile()
+        profileA.name = "A"
+        var profileB = TriggerProfile()
+        profileB.name = "B"
+        var profileC = TriggerProfile()
+        profileC.name = "C"
+
+        let movedForward = ProfileOrdering.moving(
+            [profileA, profileB, profileC],
+            draggedID: profileA.id,
+            over: profileB.id
+        )
+        guard movedForward.map(\.name) == ["B", "A", "C"] else {
+            fatalError("dragging a profile forward produced the wrong order")
+        }
+
+        let movedToEnd = ProfileOrdering.moving(
+            movedForward,
+            draggedID: profileA.id,
+            over: profileC.id
+        )
+        guard movedToEnd.map(\.name) == ["B", "C", "A"] else {
+            fatalError("dragging a profile to the end produced the wrong order")
+        }
+
+        var reorderedConfig = AppConfig()
+        reorderedConfig.profiles = movedToEnd
+        let reorderedRoundTrip = try decoder.decode(
+            AppConfig.self,
+            from: JSONEncoder().encode(reorderedConfig)
+        )
+        guard reorderedRoundTrip.profiles.map(\.name) == ["B", "C", "A"] else {
+            fatalError("the reordered profile-tab order did not persist")
+        }
+
+        let movedBackward = ProfileOrdering.moving(
+            [profileA, profileB, profileC],
+            draggedID: profileC.id,
+            over: profileA.id
+        )
+        guard movedBackward.map(\.name) == ["C", "A", "B"] else {
+            fatalError("dragging a profile backward produced the wrong order")
+        }
+
+        let unchanged = ProfileOrdering.moving(
+            [profileA, profileB, profileC],
+            draggedID: profileB.id,
+            over: profileB.id
+        )
+        guard unchanged.map(\.name) == ["A", "B", "C"] else {
+            fatalError("dropping a profile on itself must not reorder tabs")
+        }
+
+        print("AppConfig tests passed (25 tests)")
     }
 }

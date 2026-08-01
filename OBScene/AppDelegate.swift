@@ -1095,7 +1095,12 @@ extension AppDelegate {
         ActivityLog.shared.log(.recordingStarted, "Recording started")
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
-        let renderWidth: CGFloat = 980
+        let requestedRenderWidth = ProcessInfo.processInfo.environment[
+            "OBSCENE_RENDER_SETTINGS_WIDTH"
+        ].flatMap(Double.init)
+        let renderWidth = CGFloat(
+            min(max(requestedRenderWidth ?? 980, 640), 1_600)
+        )
         let requestedRenderHeight = ProcessInfo.processInfo.environment[
             "OBSCENE_RENDER_SETTINGS_HEIGHT"
         ].flatMap(Double.init)
