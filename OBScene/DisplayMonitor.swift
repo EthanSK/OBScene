@@ -206,7 +206,10 @@ class DisplayMonitor {
             || !profile.selectedScene.isEmpty
     }
 
-    private func scheduleTrigger(for profile: TriggerProfile) {
+    private func scheduleTrigger(
+        for profile: TriggerProfile,
+        eventLabel: String = "Display"
+    ) {
         cancelPendingTrigger(for: profile.id)
 
         let profileId = profile.id
@@ -217,8 +220,11 @@ class DisplayMonitor {
         triggerWorkItems[profileId] = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay), execute: workItem)
 
-        print("[OBScene] Display trigger scheduled in \(delay)s for profile '\(profile.name)'")
-        ActivityLog.shared.log(.triggerScheduled, "Trigger scheduled in \(delay)s (\(profile.name))")
+        print("[OBScene] \(eventLabel) trigger scheduled in \(delay)s for profile '\(profile.name)'")
+        ActivityLog.shared.log(
+            .triggerScheduled,
+            "\(eventLabel) trigger scheduled in \(delay)s (\(profile.name))"
+        )
 
         // Kick off OBS auto-launch + WebSocket warm-up in parallel with the
         // countdown so that by the time the delay elapses, OBS is hopefully
@@ -267,6 +273,17 @@ class DisplayMonitor {
             .info,
             "Mac woke with \(externalDisplayCount) external display(s); reconciling OBS state"
         )
+
+        // Wake/lid-open is a first-class configurable trigger. It deliberately
+        // uses the normal profile pipeline so the user chooses the exact
+        // scene/action/script combination and delay; merely waking the Mac
+        // does not imply any capture mutation by itself.
+        let wakeProfiles = WakeTriggerPolicy.profilesToFire(
+            from: ConfigStore.shared.config.profiles
+        )
+        for profile in wakeProfiles {
+            scheduleTrigger(for: profile, eventLabel: "Wake / lid-open")
+        }
 
         // Lid-open and other system wakes can return ScreenCaptureKit with its
         // prior display stream stopped. Give the topology ten seconds to settle
@@ -932,7 +949,7 @@ class DisplayMonitor {
         let obs = OBSWebSocketManager.shared
 
         let simTag = isSimulated ? " (simulated)" : ""
-        print("[OBScene] Trigger fired for '\(profile.name)' (\(profile.mode.shortLabel))!\(simTag) Executing OBS actions...")
+        print("[OBScene] Trigger fired for '\(profile.name)' (\(profile.triggerEventShortLabel))!\(simTag) Executing OBS actions...")
         ActivityLog.shared.log(.triggerFired,
             "Trigger fired — executing actions (\(profile.name))\(simTag)")
 
@@ -940,8 +957,11 @@ class DisplayMonitor {
         // inspect `profile.mode` if they care. The userInfo's `isSimulated`
         // flag lets observers (AppDelegate's last-trigger recorder + user
         // notification poster) distinguish auto from manual re-trigger.
+        let firedNotification: Notification.Name = profile.usesPlugOutSemantics
+            ? .displayUnplugTriggerFired
+            : .displayTriggerFired
         NotificationCenter.default.post(
-            name: profile.mode == .plugOut ? .displayUnplugTriggerFired : .displayTriggerFired,
+            name: firedNotification,
             object: nil,
             userInfo: [
                 "profile": profile,

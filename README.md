@@ -20,10 +20,11 @@ Plug in your battlestation displays, attach a USB capture device, or hit a custo
 ## What it does
 
 - **Trigger profiles.** Each profile is one rule: *when X happens, do Y to OBS.* Build as many as you need, run them in parallel, enable/disable per profile.
-- **Two trigger types.**
+- **Three trigger types.**
   - **External display** — fires when the count of connected external monitors crosses a threshold you pick (e.g. "when 1 external display is connected").
   - **USB device** — fires when a specific USB device is plugged in or unplugged. Match by friendly name (volume label) or by a substring of the device name; the picker lists every connected device with vendor/product info.
-- **Plug-in vs plug-out modes.** Each profile fires either on the connect edge or the disconnect edge. Want "switch scenes when the dock connects" *and* "stop recording when it disconnects"? That's two profiles, one of each mode.
+  - **Wake / Lid Open** — fires once whenever macOS wakes, including the normal lid-close → sleep → lid-open flow.
+- **Plug-in vs plug-out modes.** Display and USB profiles fire either on the connect edge or the disconnect edge. Want "switch scenes when the dock connects" *and* "stop recording when it disconnects"? That's two profiles, one of each mode. Wake profiles always fire on wake.
 - **OBS scene switching.** Per profile, pick a scene collection, profile, and program scene to switch to. Leave any of the three on *(Don't change)* to skip that step.
 - **Trigger actions.** Per profile, mix and match any of:
   - Start / Stop **Recording**
@@ -118,11 +119,12 @@ To create a profile:
 
 1. Click the **+** in the profile tab bar at the top of the profiles section.
 2. **Name** the profile and tick **Enabled** (profiles can be toggled off without being deleted).
-3. **Pick a trigger type** — *External Display* or *USB Device*.
+3. **Pick a trigger type** — *External Display*, *USB Device*, or *Wake / Lid Open*.
    - **Display:** set how many external displays must be connected to fire the trigger.
+   - **Wake / Lid Open:** fires once when macOS wakes, including the normal lid-close → sleep → lid-open flow. For macOS Screen Capture recovery, use a 10-second trigger delay and the **Refresh macOS capture source** action. That action affects ScreenCaptureKit only, not USB/HDMI Video Capture Device sources. Leave the separate global automatic recovery off to avoid requesting the same refresh twice.
    - **USB Device:** pick a device from the dropdown (lists every USB device currently attached, with vendor and volume-label info), or choose *Custom name…* and type a substring to match by name (useful when the device isn't currently plugged in).
-4. **Pick a mode** — *Plug in* (fires on the connect edge) or *Plug out* (fires on the disconnect edge).
-5. **Set the trigger delay** (default 5s) — debounce window after the edge crosses, before any actions fire. If the displays/USB drop again inside the window, the pending trigger is cancelled.
+4. **Pick a mode** for Display or USB — *Plug in* (fires on the connect edge) or *Plug out* (fires on the disconnect edge). Wake profiles do not need a mode.
+5. **Set the trigger delay** (default 5s) — the wait before actions fire. For Display and USB, the pending trigger is cancelled if the hardware condition reverses inside the window. Wake profiles fire once after their configured delay.
 6. **Set the delay between actions** (default 0s) — stagger between successive actions when the profile fires. Leave at 0 to fire them all at once.
 7. **Pick OBS targets** *(optional)* — Scene Collection, Profile, Scene. Leave any on *(Don't change)* to skip.
 8. **Add trigger actions** — tick any combination of Start/Stop Recording, Streaming, Virtual Camera, Replay Buffer, browser-source refresh, or the one-shot macOS capture refresh. Mix and match freely (e.g. *refresh macOS capture source* + *start recording* in the same profile).
@@ -143,10 +145,11 @@ The first check runs immediately. Later checks run when the drive mounts, every 
 
 ## How it works
 
-OBScene registers a `CGDisplayRegisterReconfigurationCallback` for display events and `IOServiceAddMatchingNotification` (via IOKit) for USB hot-plug events. Each event triggers a per-profile evaluation:
+OBScene registers a `CGDisplayRegisterReconfigurationCallback` for display events, `IOServiceAddMatchingNotification` (via IOKit) for USB hot-plug events, and `NSWorkspace.didWakeNotification` for system wake/lid-open events. Each event triggers a per-profile evaluation:
 
 - **Going up / plug-in** (count crosses threshold upward, or a matching USB device connects): schedules a delayed trigger. If the hardware drops before the delay elapses, the pending trigger is cancelled.
 - **Going down / plug-out** (count crosses threshold downward, or a matching USB device disconnects): immediately fires the unplug trigger.
+- **Wake / lid open:** schedules each enabled wake profile once after its configured delay. Repeated wake callbacks replace only the same profile's pending run.
 
 When a trigger fires, OBScene:
 

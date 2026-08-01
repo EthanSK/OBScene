@@ -103,6 +103,50 @@ struct AppConfigTests {
             fatalError("macOS capture refresh was not ordered before recording")
         }
 
-        print("AppConfig tests passed (12 tests)")
+        let wakeProfileJSON = """
+        {
+          "name": "Wake capture repair",
+          "isEnabled": true,
+          "triggerType": "wake",
+          "mode": "plug_out",
+          "triggerDelay": 10,
+          "actions": [
+            {"kind": "refresh_macos_capture_source", "mode": "start"}
+          ]
+        }
+        """
+        let wakeProfile = try decoder.decode(
+            TriggerProfile.self,
+            from: Data(wakeProfileJSON.utf8)
+        )
+        guard wakeProfile.triggerType == .wake,
+              wakeProfile.triggerEventShortLabel == "wake",
+              wakeProfile.triggerDelay == 10,
+              !wakeProfile.usesPlugOutSemantics else {
+            fatalError("wake profile configuration was not decoded")
+        }
+
+        var disabledWakeProfile = wakeProfile
+        disabledWakeProfile.isEnabled = false
+        var displayProfile = TriggerProfile()
+        displayProfile.triggerType = .display
+        let profilesToFire = WakeTriggerPolicy.profilesToFire(
+            from: [displayProfile, disabledWakeProfile, wakeProfile]
+        )
+        guard profilesToFire.map(\.id) == [wakeProfile.id] else {
+            fatalError("wake policy must select only enabled wake profiles")
+        }
+
+        let wakeEncoded = try JSONEncoder().encode(wakeProfile)
+        let wakeRoundTrip = try decoder.decode(
+            TriggerProfile.self,
+            from: wakeEncoded
+        )
+        guard wakeRoundTrip.triggerType == .wake,
+              wakeRoundTrip.triggerEventShortLabel == "wake" else {
+            fatalError("wake profile did not persist")
+        }
+
+        print("AppConfig tests passed (15 tests)")
     }
 }
