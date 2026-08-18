@@ -24,6 +24,17 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-08-18T21:00:00Z
+**Trigger:** Plugging in the dock repeatedly made OBS freeze or exit while OBScene changed to the 3000AD profile and scene collection
+**Symptom:** The `Displays (plug in)` trigger could switch the OBS profile, stall while switching the scene collection, and then lose the WebSocket because OBS exited. The same source-clear failure appeared intermittently across several plug-in events.
+**Root cause:** OBScene applied the selected profile and scene collection through the WebSocket after Aitum++ had loaded. Changing the scene collection at runtime tears down and rebuilds every source while Aitum++ owns additional canvases; on this Mac that transition intermittently failed to release five shared sources and destabilised OBS. The existing controlled-restart path also relaunched OBS without its selected state, so it could not avoid the same post-launch reload.
+**Fix:** Pass the trigger's selected profile, scene collection, and scene to OBS's supported `--profile`, `--collection`, and `--scene` startup arguments during cold launches and controlled restarts. `VerifiedSetEngine` already checks the current value before applying a WebSocket change, so once OBS starts in the requested state the dangerous runtime reload is skipped.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** `test-obs-launch-arguments.swift` verifies exact argument ordering, preserves names containing spaces as single arguments, and omits empty selections. Keep the display trigger's `restartOBSBeforeRun` enabled when it changes between Aitum++ scene collections; do not revert to a live WebSocket-only collection switch for this workflow.
+
+---
+
+---
 **Date:** 2026-08-01T13:25:49Z
 **Trigger:** User reported the v1.60 Settings header was visibly broken and requested drag-reorderable profile tabs plus a 2-second default action gap
 **Symptom:** At the user's narrower Settings width, the `Trigger:` label collapsed into one character per line between the profile name and the fixed-width trigger picker. Profile tabs could not be reordered, and newly created profiles fired actions simultaneously by default.

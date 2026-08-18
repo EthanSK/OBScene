@@ -244,6 +244,9 @@ class DisplayMonitor {
                 password: config.obsPassword,
                 autoLaunch: config.autoLaunchOBS,
                 timeoutSeconds: config.obsLaunchTimeoutSeconds,
+                selectedProfile: profile.selectedProfile,
+                selectedSceneCollection: profile.selectedSceneCollection,
+                selectedScene: profile.selectedScene,
                 onReady: { _ in }
             )
         }
@@ -574,6 +577,9 @@ class DisplayMonitor {
                 password: config.obsPassword,
                 autoLaunch: config.autoLaunchOBS,
                 timeoutSeconds: config.obsLaunchTimeoutSeconds,
+                selectedProfile: profile.selectedProfile,
+                selectedSceneCollection: profile.selectedSceneCollection,
+                selectedScene: profile.selectedScene,
                 onReady: { _ in }
             )
         }
@@ -735,7 +741,13 @@ class DisplayMonitor {
                     // run (or timed out and been left detached), so we don't
                     // want restartOBS to re-run it on either the happy path
                     // or any abort path.
-                    OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
+                    OBSAppController.restartOBS(
+                        profileName: profile.name,
+                        selectedProfile: profile.selectedProfile,
+                        selectedSceneCollection: profile.selectedSceneCollection,
+                        selectedScene: profile.selectedScene,
+                        isSimulated: isSimulated
+                    ) { [weak self] in
                         guard let self = self else { return }
 
                         // Same script-only fast-path check as the synchronous branch.
@@ -756,7 +768,13 @@ class DisplayMonitor {
             ActivityLog.shared.log(.info,
                 "Restart-before-run requested (\(profile.name))",
                 userVisible: true)
-            OBSAppController.restartOBS(profileName: profile.name, isSimulated: isSimulated) { [weak self] in
+            OBSAppController.restartOBS(
+                profileName: profile.name,
+                selectedProfile: profile.selectedProfile,
+                selectedSceneCollection: profile.selectedSceneCollection,
+                selectedScene: profile.selectedScene,
+                isSimulated: isSimulated
+            ) { [weak self] in
                 guard let self = self else { return }
                 ActivityLog.shared.log(.info,
                     "Running profile script (\(profile.name))",
@@ -833,6 +851,9 @@ class DisplayMonitor {
             password: config.obsPassword,
             autoLaunch: config.autoLaunchOBS,
             timeoutSeconds: timeout,
+            selectedProfile: profile.selectedProfile,
+            selectedSceneCollection: profile.selectedSceneCollection,
+            selectedScene: profile.selectedScene,
             onReady: { [weak self] result in
                 guard let self = self else { return }
                 switch result {

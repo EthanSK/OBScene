@@ -1869,10 +1869,15 @@ class OBSWebSocketManager: ObservableObject {
         )
     }
 
-    /// Launch OBS Studio if it's installed. Returns false when OBS isn't
-    /// installed on this machine.
+    /// Launch OBS Studio if it's installed. Passing the selected state on the
+    /// process command line lets OBS load that state before plugins initialise,
+    /// avoiding a destructive scene-collection reload after Aitum++ is live.
     @discardableResult
-    func launchOBS() -> Bool {
+    func launchOBS(
+        selectedProfile: String = "",
+        selectedSceneCollection: String = "",
+        selectedScene: String = ""
+    ) -> Bool {
         guard let url = obsApplicationURL() else { return false }
 
         // Launch OBS headlessly (no Dock bounce, don't steal focus) so the
@@ -1882,6 +1887,11 @@ class OBSWebSocketManager: ObservableObject {
         config.activates = false
         config.addsToRecentItems = false
         config.hides = false
+        config.arguments = OBSLaunchArguments.make(
+            selectedProfile: selectedProfile,
+            selectedSceneCollection: selectedSceneCollection,
+            selectedScene: selectedScene
+        )
 
         NSWorkspace.shared.openApplication(at: url, configuration: config) { runningApp, error in
             if let error = error {
@@ -1941,9 +1951,9 @@ class OBSWebSocketManager: ObservableObject {
     ///     accept a connection.
     ///   - Call `onReady` with the result on the main queue.
     ///
-    /// `host`, `port`, `password` come from the caller so we don't touch
-    /// ConfigStore from here (keeps this method testable and side-effect free
-    /// apart from the launch + connect calls).
+    /// `host`, `port`, `password`, and optional startup selections come from
+    /// the caller so we don't touch ConfigStore from here (keeps this method
+    /// testable and side-effect free apart from the launch + connect calls).
     ///
     /// Returns a handle that can be cancelled if the trigger becomes moot
     /// (e.g. displays disconnected during the wait).
@@ -1954,6 +1964,9 @@ class OBSWebSocketManager: ObservableObject {
         password: String,
         autoLaunch: Bool,
         timeoutSeconds: Int,
+        selectedProfile: String = "",
+        selectedSceneCollection: String = "",
+        selectedScene: String = "",
         onReady: @escaping (EnsureConnectedResult) -> Void
     ) -> EnsureConnectedHandle {
         // Coalesce: if one is already running, cancel it and replace. This
@@ -1989,7 +2002,11 @@ class OBSWebSocketManager: ObservableObject {
             }
             print("[OBScene] OBS not running — launching…")
             ActivityLog.shared.log(.info, "OBS not running — launching")
-            _ = launchOBS()
+            _ = launchOBS(
+                selectedProfile: selectedProfile,
+                selectedSceneCollection: selectedSceneCollection,
+                selectedScene: selectedScene
+            )
             // Mark cold-launch state on the manager so a coalesced
             // follow-up `ensureConnected` (e.g. trigger pre-warm fires,
             // then real trigger fires while OBS is still booting) still
@@ -2501,6 +2518,9 @@ enum OBSAppController {
     /// semantics so a flaky restart doesn't kick off a script when the
     /// surrounding OBS pipeline is going to fail anyway.
     static func restartOBS(profileName: String,
+                           selectedProfile: String,
+                           selectedSceneCollection: String,
+                           selectedScene: String,
                            isSimulated: Bool = false,
                            beforeRun: @escaping () -> Void) {
         DispatchQueue.main.async {
@@ -2573,6 +2593,9 @@ enum OBSAppController {
                         DispatchQueue.main.async {
                             Self.performRestart(
                                 profileName: profileName,
+                                selectedProfile: selectedProfile,
+                                selectedSceneCollection: selectedSceneCollection,
+                                selectedScene: selectedScene,
                                 isSimulated: isSimulated,
                                 beforeRun: beforeRun
                             )
@@ -2898,6 +2921,9 @@ enum OBSAppController {
     /// always runs from a Simulate Trigger click — see `restartOBS` doc for
     /// the rationale.
     private static func performRestart(profileName: String,
+                                       selectedProfile: String,
+                                       selectedSceneCollection: String,
+                                       selectedScene: String,
                                        isSimulated: Bool,
                                        beforeRun: @escaping () -> Void) {
         let obs = OBSWebSocketManager.shared
@@ -3108,6 +3134,11 @@ enum OBSAppController {
                 config.activates = false
                 config.addsToRecentItems = false
                 config.hides = false
+                config.arguments = OBSLaunchArguments.make(
+                    selectedProfile: selectedProfile,
+                    selectedSceneCollection: selectedSceneCollection,
+                    selectedScene: selectedScene
+                )
                 NSWorkspace.shared.openApplication(at: obsAppURL, configuration: config) { runningApp, error in
                     DispatchQueue.main.async {
                         if let error = error {
