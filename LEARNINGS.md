@@ -24,6 +24,28 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-08-19T17:35:00Z
+**Trigger:** User required the display-plug profile to restart OBS before its Restream script and every later OBS action
+**Symptom:** With `restartOBSBeforeRun` enabled and `runScriptBeforeRestart` disabled, OBScene restarted OBS and launched the profile script, but immediately continued to profile, collection, scene, and output actions while the script was still running.
+**Root cause:** The script-before-restart branch used `ScriptRunner.runAndWait`, while the default restart-before-script branch still used the detached `ScriptRunner.run` path. The UI ordering choice therefore changed launch order but did not provide a completion barrier before later actions.
+**Fix:** Run the post-restart script through `ScriptRunner.runAndWait` too, and resume the OBS pipeline only after exit, launch failure, signal termination, or the existing 60-second safety timeout. The timeout leaves the script running in the background and proceeds so a broken script cannot lock the trigger forever.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** Keep both restart/script orderings completion-gated. In restart-before-script mode, never restore a detached script launch before recording/streaming actions; the user's Restream preparation must finish first.
+
+---
+
+---
+**Date:** 2026-08-19T17:12:00Z
+**Trigger:** The 3000AD OBS preview remained black after a controlled restart during display setup
+**Symptom:** The webcam rendered but the main capture-card picture was black. `GetSourceScreenshot` could not render the `Capture Card Device` source, and substituting the generic `USB Video` endpoint produced `Configured format not found on device`.
+**Root cause:** OBS restarted while the exact `Live Gamer Ultra 2.1-Video` endpoint (`0x20000007ca2553`) was absent. The source was still configured for that device and its 3440x1440 60 FPS format, so there was no compatible fallback. After the USB capture device was replugged, OBS received its connect event and the exact source produced frames again.
+**Fix:** Preserve the exact Live Gamer device binding and supported 3440x1440 60 FPS format; reconnect the hardware endpoint when it is genuinely absent. Do not silently bind this source to an arbitrary generic UVC device.
+**Commit:** runtime diagnosis; no source change
+**Guard:** Diagnose the OBS log and input property list before changing capture settings. Require the exact device endpoint and a successful source-frame probe before calling the capture recovered; a live webcam or non-black composite preview does not prove the capture-card input works.
+
+---
+
+---
 **Date:** 2026-08-18T21:00:00Z
 **Trigger:** Plugging in the dock repeatedly made OBS freeze or exit while OBScene changed to the 3000AD profile and scene collection
 **Symptom:** The `Displays (plug in)` trigger could switch the OBS profile, stall while switching the scene collection, and then lose the WebSocket because OBS exited. The same source-clear failure appeared intermittently across several plug-in events.

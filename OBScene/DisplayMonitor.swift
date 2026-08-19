@@ -667,13 +667,12 @@ class DisplayMonitor {
         // still alive (e.g. for scripts that talk to OBS over the WebSocket
         // before tearing it down).
         //
-        // Timing semantics for the new "script before restart" branch:
-        //   - The script is launched via `ScriptRunner.runAndWait(...)` and
-        //     the OBS restart is gated on its completion. We DO wait for the
-        //     script's process to exit before sending the OBS terminate event,
-        //     so scripts that need to land changes (e.g. update an OBS dock
-        //     URL via the WebSocket, write to a config file the next launch
-        //     reads) are guaranteed to finish before OBS quits.
+        // Timing semantics for both restart/script orderings:
+        //   - The script is launched via `ScriptRunner.runAndWait(...)`. In
+        //     script-before-restart mode, the restart waits for it. In the
+        //     default restart-before-script mode, the later profile,
+        //     collection, scene, and output actions wait for it. This avoids
+        //     recording or streaming before a preparation script has landed.
         //   - There's a hard 60s safety cap. If the user's script hangs
         //     indefinitely we DON'T want to lock up the whole trigger
         //     pipeline; we log a warning, leave the script running detached
@@ -709,7 +708,7 @@ class DisplayMonitor {
                 ScriptRunner.runAndWait(
                     script: profile.runScript,
                     profileName: profile.name,
-                    timeout: Self.scriptBeforeRestartTimeout
+                    timeout: Self.restartOrderedScriptTimeout
                 ) { [weak self] outcome in
                     guard let self = self else { return }
                     let elapsed = Date().timeIntervalSince(scriptStartedAt)
@@ -733,7 +732,7 @@ class DisplayMonitor {
                             userVisible: true)
                     case .timedOut:
                         ActivityLog.shared.log(.info,
-                            "Script still running after \(Int(Self.scriptBeforeRestartTimeout))s timeout — leaving it detached and proceeding with restart (\(profile.name))",
+                            "Script still running after \(Int(Self.restartOrderedScriptTimeout))s timeout — leaving it detached and proceeding with restart (\(profile.name))",
                             userVisible: true)
                     }
 
@@ -777,20 +776,43 @@ class DisplayMonitor {
             ) { [weak self] in
                 guard let self = self else { return }
                 ActivityLog.shared.log(.info,
-                    "Running profile script (\(profile.name))",
+                    "Running profile script for \"\(profile.name)\" — waiting before OBS actions.",
                     userVisible: true)
-                ScriptRunner.run(script: profile.runScript, profileName: profile.name)
+                let scriptStartedAt = Date()
+                ScriptRunner.runAndWait(
+                    script: profile.runScript,
+                    profileName: profile.name,
+                    timeout: Self.restartOrderedScriptTimeout
+                ) { [weak self] outcome in
+                    guard let self = self else { return }
+                    let elapsed = Date().timeIntervalSince(scriptStartedAt)
+                    switch outcome {
+                    case .exited(let status):
+                        ActivityLog.shared.log(.info,
+                            "Profile script for \"\(profile.name)\" finished in \(String(format: "%.1f", elapsed))s (status \(status)). Proceeding with OBS actions.",
+                            userVisible: true)
+                    case .signalled(let signal):
+                        ActivityLog.shared.log(.info,
+                            "Profile script for \"\(profile.name)\" terminated by signal \(signal) after \(String(format: "%.1f", elapsed))s. Proceeding with OBS actions.",
+                            userVisible: true)
+                    case .failedToLaunch(let reason):
+                        ActivityLog.shared.log(.info,
+                            "Couldn't launch profile script for \"\(profile.name)\": \(reason). Proceeding with OBS actions.",
+                            userVisible: true)
+                    case .timedOut:
+                        ActivityLog.shared.log(.info,
+                            "Profile script for \"\(profile.name)\" still running after \(Int(Self.restartOrderedScriptTimeout))s; leaving it in the background and proceeding with OBS actions.",
+                            userVisible: true)
+                    }
 
-                // Same script-only fast-path check as the synchronous branch.
-                if !Self.profileHasOBSWork(profile) { return }
+                    // Same script-only fast-path check as the synchronous branch.
+                    if !Self.profileHasOBSWork(profile) { return }
 
-                // Resume the OBS pipeline. Restart() leaves the WebSocket
-                // either connected (happy path) or disconnected (the user has
-                // recording/streaming active and we skipped restart, OR the
-                // restart aborted on timeout — in both cases the existing
-                // ensureConnected logic in `continueOBSPipeline` handles it
-                // correctly).
-                self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
+                    // Resume the OBS pipeline only after the post-restart script
+                    // exits (or reaches its safety timeout), so later profile,
+                    // collection, scene, and output actions cannot race it.
+                    self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
+                }
             }
             return
         }
@@ -922,16 +944,12 @@ class DisplayMonitor {
     // and the scene collection SECOND. That makes the overall operation
     // land more deterministically — by the time the scene-collection change
     // completes, the profile has settled too.
-    /// Hard cap on how long the run-script-before-restart branch will block
-    /// the OBS restart waiting for the user's script to exit. If the script
-    /// hangs longer than this we log a warning, leave the child process
-    /// running detached (same fire-and-forget orphan model as the legacy
-    /// path), and proceed with the restart anyway. 60s is a deliberately
-    /// generous default — it covers the common case (a script that does
-    /// network I/O against the Restream / OBS WebSocket APIs and exits in
-    /// 1-5s) while guaranteeing OBScene never locks up indefinitely on a
-    /// broken script.
-    private static let scriptBeforeRestartTimeout: TimeInterval = 60.0
+    /// Hard cap on how long either restart/script ordering blocks its next
+    /// phase waiting for the user's script to exit. If the script hangs longer
+    /// than this we log a warning, leave the child process running detached,
+    /// and proceed. 60s covers the common 1-5s network/OBS helper while
+    /// guaranteeing OBScene never locks up indefinitely on a broken script.
+    private static let restartOrderedScriptTimeout: TimeInterval = 60.0
 
     private static let sceneToActionsDelay:      TimeInterval = 0.25 // 250ms
     /// Brief settle delay after a verified scene-collection change before
