@@ -24,6 +24,17 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-08-19T17:52:00Z
+**Trigger:** Final Release verification after adding restart-ordered script gating
+**Symptom:** `scripts/build-app.sh` compiled successfully, but the Xcode Release scheme failed because `OBSWebSocketManager.swift` could not find `OBSLaunchArguments`.
+**Root cause:** The earlier helper was added as a Swift file and therefore picked up by the shell build's source glob, but it was never added to the Xcode project's file group and Sources phase.
+**Fix:** Add `OBSLaunchArguments.swift` to both the PBX file references and the OBScene Sources build phase.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** When adding a Swift source file, verify both `scripts/build-app.sh` and the Xcode Release scheme; the two build paths discover source files differently.
+
+---
+
+---
 **Date:** 2026-08-19T17:35:00Z
 **Trigger:** User required the display-plug profile to restart OBS before its Restream script and every later OBS action
 **Symptom:** With `restartOBSBeforeRun` enabled and `runScriptBeforeRestart` disabled, OBScene restarted OBS and launched the profile script, but immediately continued to profile, collection, scene, and output actions while the script was still running.
