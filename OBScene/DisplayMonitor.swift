@@ -648,14 +648,10 @@ class DisplayMonitor {
             lastAutomaticDisplayProfileID = profile.id
         }
 
-        // Fire the per-profile "Run on activate" shell hook FIRST, before any
-        // OBS connection gating. This way script-only profiles still work
-        // when OBS is disconnected / unconfigured / not installed, and scripts
-        // intended to prep or recover OBS (e.g. `open -a OBS`, reset a
-        // WebSocket) have a chance to run before the OBS pipeline bails out.
-        // The script runs detached; the main trigger pipeline proceeds
-        // immediately afterwards. Empty / whitespace-only runScript values
-        // are no-ops inside ScriptRunner.
+        // Classify the per-profile shell hook before OBS connection gating so
+        // script-only profiles still work when OBS is unavailable. Hooks without
+        // a restart remain detached; restart-ordered hooks completion-gate their
+        // next phase below. Empty runScript values are no-ops in ScriptRunner. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
         let hasScript = !profile.runScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         // If the profile has both a script AND `restartOBSBeforeRun`, the
@@ -676,7 +672,7 @@ class DisplayMonitor {
         //   - There's a hard 60s safety cap. If the user's script hangs
         //     indefinitely we DON'T want to lock up the whole trigger
         //     pipeline; we log a warning, leave the script running detached
-        //     in the background, and proceed with the restart anyway. The
+        //     in the background, and proceed with the next phase. The
         //     orphaned process re-parents to launchd, same as the existing
         //     fire-and-forget contract.
         //   - We still route the restart through `OBSAppController.restartOBS`
@@ -736,10 +732,9 @@ class DisplayMonitor {
                             userVisible: true)
                     }
 
-                    // Restart with a no-op `beforeRun` — the script has already
-                    // run (or timed out and been left detached), so we don't
-                    // want restartOBS to re-run it on either the happy path
-                    // or any abort path.
+                    // The restart continuation must not re-run the script: it
+                    // has already exited or timed out. It resumes the OBS
+                    // pipeline on both the happy path and safe abort paths.
                     OBSAppController.restartOBS(
                         profileName: profile.name,
                         selectedProfile: profile.selectedProfile,
@@ -752,12 +747,8 @@ class DisplayMonitor {
                         // Same script-only fast-path check as the synchronous branch.
                         if !Self.profileHasOBSWork(profile) { return }
 
-                        // Resume the OBS pipeline. Restart() leaves the WebSocket
-                        // either connected (happy path) or disconnected (the user
-                        // has recording/streaming active and we skipped restart,
-                        // OR the restart aborted on timeout — in both cases the
-                        // existing ensureConnected logic in `continueOBSPipeline`
-                        // handles it correctly).
+                        // Resume the OBS pipeline. If restartOBS safely skipped or
+                        // aborted, continueOBSPipeline owns reconnection handling.
                         self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
                     }
                 }

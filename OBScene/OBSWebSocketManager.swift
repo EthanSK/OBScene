@@ -2504,9 +2504,10 @@ enum OBSAppController {
 
     /// Public entry point. Called from DisplayMonitor's profile-fire handler
     /// when `profile.restartOBSBeforeRun == true`. `profileName` is logged for
-    /// auditability. `beforeRun` is the closure that actually invokes the
-    /// user's script (via ScriptRunner) — we call it after the restart
-    /// settles, OR immediately when we skip / throttle.
+    /// auditability. `beforeRun` is the caller's continuation: the default
+    /// ordering uses it to run the script, while script-before-restart uses it
+    /// to resume the remaining pipeline. We call it after the restart settles,
+    /// or immediately when we safely skip / throttle. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
     ///
     /// `isSimulated` is true when the trigger came from the Settings
     /// "Simulate Trigger" button. In that case we ALWAYS invoke `beforeRun()`
