@@ -47,6 +47,7 @@ xcrun swiftc \
   -o "$SAFEMODE_BIN" \
   "$ROOT/OBScene/FileTransferModels.swift" \
   "$ROOT/OBScene/ConfigStore.swift" \
+  "$ROOT/OBScene/OBSApplicationResolver.swift" \
   "$ROOT/OBScene/SafeModeDialogDismisser.swift" \
   "$ROOT/scripts/test-safe-mode-dismisser.swift"
 echo "[test] running SafeModeDialogDismisser tests"

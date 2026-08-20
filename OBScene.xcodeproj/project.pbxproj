@@ -29,6 +29,7 @@
 		A100001C00000000000001C0 /* MacOSCaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001C00000000000001CA /* MacOSCaptureRecovery.swift */; };
 		A100001D00000000000001D0 /* CaptureRecoveryDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */; };
 		A100001E00000000000001E0 /* OBSLaunchArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001E00000000000001EA /* OBSLaunchArguments.swift */; };
+		A100001F00000000000001F0 /* OBSApplicationResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200001F00000000000001FA /* OBSApplicationResolver.swift */; };
 		A10000150000000000000150 /* Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; };
 		A10000160000000000000160 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A2000017000000000000017A /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -59,6 +60,7 @@
 		A200001C00000000000001CA /* MacOSCaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSCaptureRecovery.swift; sourceTree = "<group>"; };
 		A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRecoveryDiagnostics.swift; sourceTree = "<group>"; };
 		A200001E00000000000001EA /* OBSLaunchArguments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OBSLaunchArguments.swift; sourceTree = "<group>"; };
+		A200001F00000000000001FA /* OBSApplicationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OBSApplicationResolver.swift; sourceTree = "<group>"; };
 		A30000010000000000000001 /* OBScene.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OBScene.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -122,6 +124,7 @@
 				A200001C00000000000001CA /* MacOSCaptureRecovery.swift */,
 				A200001D00000000000001DA /* CaptureRecoveryDiagnostics.swift */,
 				A200001E00000000000001EA /* OBSLaunchArguments.swift */,
+				A200001F00000000000001FA /* OBSApplicationResolver.swift */,
 				A20000070000000000000007 /* Info.plist */,
 				A20000080000000000000008 /* OBScene.entitlements */,
 			);
@@ -216,6 +219,7 @@
 				A100001C00000000000001C0 /* MacOSCaptureRecovery.swift in Sources */,
 				A100001D00000000000001D0 /* CaptureRecoveryDiagnostics.swift in Sources */,
 				A100001E00000000000001E0 /* OBSLaunchArguments.swift in Sources */,
+				A100001F00000000000001F0 /* OBSApplicationResolver.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

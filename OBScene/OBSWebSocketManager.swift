@@ -697,9 +697,7 @@ class OBSWebSocketManager: ObservableObject {
                 "Last-Space periodic capture skipped: WebSocket not connected")
             return
         }
-        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-        }) else {
+        guard let runningApp = OBSApplicationResolver.runningApplication() else {
             ActivityLog.shared.log(.info,
                 "Last-Space periodic capture skipped: no running OBS process")
             return
@@ -1851,22 +1849,15 @@ class OBSWebSocketManager: ObservableObject {
 
     // MARK: - OBS process detection + launch
 
-    /// Bundle identifier used by OBS Studio on macOS.
-    static let obsBundleIdentifier = "com.obsproject.obs-studio"
-
     /// Returns true if an OBS Studio process is currently running.
     func isOBSRunning() -> Bool {
-        return NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-        }
+        return !OBSApplicationResolver.runningApplications().isEmpty
     }
 
     /// Returns the filesystem URL of the installed OBS Studio app, or nil if
     /// OBS is not installed on this machine.
     func obsApplicationURL() -> URL? {
-        return NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: OBSWebSocketManager.obsBundleIdentifier
-        )
+        return OBSApplicationResolver.applicationURL()
     }
 
     /// Launch OBS Studio if it's installed. Passing the selected state on the
@@ -1919,7 +1910,7 @@ class OBSWebSocketManager: ObservableObject {
     enum EnsureConnectedResult {
         /// Already connected, or became connected within the timeout.
         case connected
-        /// OBS isn't installed (no app bundle with `com.obsproject.obs-studio`).
+        /// Neither OBS++ nor official OBS is installed.
         case obsNotInstalled
         /// OBS process is running but the WebSocket server never became
         /// available within the timeout — usually because the user hasn't
@@ -2135,9 +2126,7 @@ class OBSWebSocketManager: ObservableObject {
         // Resolve the freshly-launched OBS process. If it's gone (user
         // immediately killed it during the brief window between Identify
         // and this callback), there's nothing to restore — log + complete.
-        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-        }) else {
+        guard let runningApp = OBSApplicationResolver.runningApplication() else {
             ActivityLog.shared.log(.info,
                 "Cold-launch Space restore: OBS no longer running at WebSocket-ready — skipping (\(profileName))")
             completion()
@@ -2931,9 +2920,7 @@ enum OBSAppController {
 
         // Re-resolve the running OBS instance (it may have exited between the
         // pre-flight and now — unlikely but possible).
-        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-        }) else {
+        guard let runningApp = OBSApplicationResolver.runningApplication() else {
             // User-visible: paired with the "OBS restart requested" line
             // so the tab shows the user what actually happened to that
             // request.
@@ -3234,9 +3221,7 @@ enum OBSAppController {
                                 }
 
                                 if let spaceID = capturedSpaceID,
-                                   let app = runningApp ?? NSWorkspace.shared.runningApplications.first(where: {
-                                       $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-                                   }) {
+                                   let app = runningApp ?? OBSApplicationResolver.runningApplication() {
                                     SpaceManager.restoreOBSWindow(
                                         pid: app.processIdentifier,
                                         toSpace: spaceID,
@@ -3343,9 +3328,7 @@ enum OBSAppController {
         // exit, but a separate OBS process (different bundle copy, different
         // user-launched instance) is theoretically possible. If ANY OBS is
         // up, bail — we'd risk deleting a live sentinel.
-        let liveOBSCount = NSWorkspace.shared.runningApplications.filter {
-            $0.bundleIdentifier == OBSWebSocketManager.obsBundleIdentifier
-        }.count
+        let liveOBSCount = OBSApplicationResolver.runningApplications().count
         if liveOBSCount > 0 {
             ActivityLog.shared.log(.info,
                 "Skipping crash-sentinel sweep — \(liveOBSCount) OBS process(es) still running (\(profileName))")
