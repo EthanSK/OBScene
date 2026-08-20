@@ -202,6 +202,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         endAppNapSuppression()
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) { // LaunchServices delivers this after a cold launch too, so Aitum++ never races a timed notification against OBScene startup. (Codex task: 01a01b14-9ef1-7082-99e7-1885d5d90235)
+        for url in urls where url.scheme == "obscene" && url.host == "restart-obs" {
+            let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+            let profile = queryItems?.first(where: { $0.name == "profile" })?.value ?? ""
+            let sceneCollection = queryItems?.first(where: { $0.name == "sceneCollection" })?.value ?? ""
+            let scene = queryItems?.first(where: { $0.name == "scene" })?.value ?? ""
+            restartOBSRequested(profile: profile, sceneCollection: sceneCollection, scene: scene)
+        }
+    }
+
+    private func restartOBSRequested(profile: String, sceneCollection: String, scene: String) {
+        guard !profile.isEmpty, !sceneCollection.isEmpty, !scene.isEmpty else {
+            ActivityLog.shared.log(
+                .info,
+                "Rejected Aitum++ Restart OBS request because its OBS selection was incomplete",
+                userVisible: true
+            )
+            UserNotifier.post(
+                title: "OBScene: couldn't restart OBS",
+                body: "Aitum++ could not read the current OBS profile, scene collection, and scene."
+            )
+            return
+        }
+
+        ActivityLog.shared.log(
+            .info,
+            "Aitum++ toolbar requested a safe OBS restart",
+            userVisible: true
+        )
+        OBSAppController.restartOBS(
+            profileName: "Aitum++ toolbar",
+            selectedProfile: profile,
+            selectedSceneCollection: sceneCollection,
+            selectedScene: scene
+        ) {
+            ActivityLog.shared.log(
+                .info,
+                "Aitum++ toolbar restart request finished",
+                userVisible: true
+            )
+        }
+    }
+
     private func beginAppNapSuppression() {
         guard appNapActivityToken == nil else { return }
         appNapActivityToken = ProcessInfo.processInfo.beginActivity(
