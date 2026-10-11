@@ -236,10 +236,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             selectedProfile: profile,
             selectedSceneCollection: sceneCollection,
             selectedScene: scene
-        ) {
+        ) { canRunOBSWork in
             ActivityLog.shared.log(
                 .info,
-                "Aitum++ toolbar restart request finished",
+                canRunOBSWork ? "Aitum++ toolbar restart request finished" : "Aitum++ toolbar restart request safely skipped",
                 userVisible: true
             )
         }

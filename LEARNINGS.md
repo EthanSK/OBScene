@@ -24,6 +24,16 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-11T16:00:00Z
+**Trigger:** OBS++ exited after a scene-change warning when the dock was connected.
+**Symptom:** OBS logged that five sources survived scene cleanup, showed `SourceCleanupError`, and later shut down. There was no corresponding new crash report. OBScene's log first said live output state was unknown and the configured restart was aborted, then switched the profile and scene collection anyway.
+**Root cause:** `restartOBS` used a result-free continuation for both successful restarts and safety aborts. Both restart/script orderings consequently allowed the remaining OBS pipeline after a refused restart. This reproduced the previously identified unsafe live collection-switch path; the exact owner retaining the sources remains unproven.
+**Fix:** Pass an explicit continuation permission through restart preflight and relaunch outcomes. Both DisplayMonitor orderings still honor the configured script behavior but skip profile, collection, scene, and output actions when the required restart did not succeed. Keep the existing cold-launch path, live-output checks, Space restoration, and OBS's protective error intact.
+**Guard:** `scripts/test-restart-continuation.py` exercises the production restart entry in isolation for ten outcomes, including unknown state, disconnection, failed stops, throttling, and cold launch. Both caller guards are retained in source checks; the full test suite and universal application build pass. Do not claim this proves the underlying source-retention bug is fixed, and do not install the older public v1.62 over this safety branch.
+
+---
+
+---
 **Date:** 2026-08-19T17:52:00Z
 **Trigger:** Final Release verification after adding restart-ordered script gating
 **Symptom:** `scripts/build-app.sh` compiled successfully, but the Xcode Release scheme failed because `OBSWebSocketManager.swift` could not find `OBSLaunchArguments`.

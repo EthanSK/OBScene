@@ -2496,7 +2496,10 @@ enum OBSAppController {
     /// auditability. `beforeRun` is the caller's continuation: the default
     /// ordering uses it to run the script, while script-before-restart uses it
     /// to resume the remaining pipeline. We call it after the restart settles,
-    /// or immediately when we safely skip / throttle. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
+    /// or immediately when we safely skip / throttle. The continuation receives
+    /// false when the required restart did not finish, so scripts can still run
+    /// without falling through to a live scene-collection reload.
+    /// (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
     ///
     /// `isSimulated` is true when the trigger came from the Settings
     /// "Simulate Trigger" button. In that case we ALWAYS invoke `beforeRun()`
@@ -2512,7 +2515,7 @@ enum OBSAppController {
                            selectedSceneCollection: String,
                            selectedScene: String,
                            isSimulated: Bool = false,
-                           beforeRun: @escaping () -> Void) {
+                           beforeRun: @escaping (Bool) -> Void) {
         DispatchQueue.main.async {
             // Throttle: a recent or in-flight restart short-circuits. Both
             // outcomes are user-visible so the Activity tab can explain
@@ -2522,7 +2525,7 @@ enum OBSAppController {
                 ActivityLog.shared.log(.info,
                     "OBS restart already in progress (\(profileName)) — skipping restart, running script",
                     userVisible: true)
-                beforeRun()
+                beforeRun(false)
                 return
             }
             if let last = Self.lastRestartAt,
@@ -2530,7 +2533,7 @@ enum OBSAppController {
                 ActivityLog.shared.log(.info,
                     "OBS restart throttled (last was <\(Int(Self.throttleWindow))s ago, \(profileName)) — running script",
                     userVisible: true)
-                beforeRun()
+                beforeRun(false)
                 return
             }
 
@@ -2547,7 +2550,7 @@ enum OBSAppController {
                 ActivityLog.shared.log(.info,
                     "OBS not running — skipping restart, running script (\(profileName))",
                     userVisible: true)
-                beforeRun()
+                beforeRun(true)
                 return
             }
 
@@ -2559,7 +2562,7 @@ enum OBSAppController {
                 ActivityLog.shared.log(.info,
                     "OBS not connected to WebSocket — skipping restart for safety, running script (\(profileName))",
                     userVisible: true)
-                beforeRun()
+                beforeRun(false)
                 return
             }
 
@@ -2607,7 +2610,7 @@ enum OBSAppController {
                         "OBS streaming/recording state unknown — aborting restart for safety, running script (\(profileName))",
                         userVisible: true)
                     Self.restartInFlight = false
-                    beforeRun()
+                    beforeRun(false) // Unknown outputs must block scene changes too; this fell through to a source-cleanup exit on 2026-10-11. (Codex task: 01a01b14-9ef1-7082-99e7-1885d5d90235)
 
                 case .active(let streaming, let recording):
                     let activeKinds = [
@@ -2635,7 +2638,7 @@ enum OBSAppController {
                                     "OBS stop-outputs did not complete within \(Int(Self.stopOutputsTimeoutSeconds))s — aborting restart, running script (\(profileName))",
                                     userVisible: true)
                                 Self.restartInFlight = false
-                                beforeRun()
+                                beforeRun(false)
                                 return
                             }
                             ActivityLog.shared.log(.info,
@@ -2915,7 +2918,7 @@ enum OBSAppController {
                                        selectedSceneCollection: String,
                                        selectedScene: String,
                                        isSimulated: Bool,
-                                       beforeRun: @escaping () -> Void) {
+                                       beforeRun: @escaping (Bool) -> Void) {
         let obs = OBSWebSocketManager.shared
 
         // Re-resolve the running OBS instance (it may have exited between the
@@ -2928,7 +2931,7 @@ enum OBSAppController {
                 "OBS no longer running at restart step — running script (\(profileName))",
                 userVisible: true)
             Self.restartInFlight = false
-            beforeRun()
+            beforeRun(true)
             return
         }
         let pid = runningApp.processIdentifier
@@ -2941,7 +2944,7 @@ enum OBSAppController {
             // for the relaunch step. Run the script anyway (for real and
             // simulated triggers) since the OBS app is still in whatever
             // state it was before this attempt.
-            beforeRun()
+            beforeRun(false)
             return
         }
 
@@ -3032,7 +3035,7 @@ enum OBSAppController {
             // OBS is still up in its original state. Run the script (matches
             // pre-isSimulated behaviour for real triggers; the dry-run path
             // also wants the script regardless).
-            beforeRun()
+            beforeRun(false)
             return
         }
         ActivityLog.shared.log(.info, "OBS terminate() sent (\(profileName))")
@@ -3081,7 +3084,7 @@ enum OBSAppController {
                     // (matching the original design); Simulate Trigger still
                     // runs the activate script so the user's dry-run shows
                     // every side effect they configured. See `restartOBS`.
-                    if isSimulated { beforeRun() }
+                    if isSimulated { beforeRun(false) }
                     return
                 }
                 let elapsed = Date().timeIntervalSince(quitStartedAt)
@@ -3137,7 +3140,7 @@ enum OBSAppController {
                             restoreWebSocketAfterAbort()
                             // Simulate Trigger still runs the script even
                             // when relaunch fails — see `restartOBS` doc.
-                            if isSimulated { beforeRun() }
+                            if isSimulated { beforeRun(false) }
                             return
                         }
                         if let app = runningApp {
@@ -3169,7 +3172,7 @@ enum OBSAppController {
                                     // Simulate Trigger still runs the script
                                     // even when the websocket never came back
                                     // — see `restartOBS` doc.
-                                    if isSimulated { beforeRun() }
+                                    if isSimulated { beforeRun(false) }
                                     return
                                 }
                                 ActivityLog.shared.log(.info,
@@ -3217,7 +3220,7 @@ enum OBSAppController {
                                     guard settleDone, restoreDone else { return }
                                     postRestartCompleted = true
                                     Self.restartInFlight = false
-                                    beforeRun()
+                                    beforeRun(true)
                                 }
 
                                 if let spaceID = capturedSpaceID,

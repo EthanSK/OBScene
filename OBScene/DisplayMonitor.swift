@@ -734,21 +734,25 @@ class DisplayMonitor {
 
                     // The restart continuation must not re-run the script: it
                     // has already exited or timed out. It resumes the OBS
-                    // pipeline on both the happy path and safe abort paths.
+                    // pipeline only after the required restart succeeds.
                     OBSAppController.restartOBS(
                         profileName: profile.name,
                         selectedProfile: profile.selectedProfile,
                         selectedSceneCollection: profile.selectedSceneCollection,
                         selectedScene: profile.selectedScene,
                         isSimulated: isSimulated
-                    ) { [weak self] in
+                    ) { [weak self] canRunOBSWork in
                         guard let self = self else { return }
+                        guard canRunOBSWork else { // A refused restart must not become the live collection switch that the restart was meant to avoid.
+                            ActivityLog.shared.log(.info, "Skipping OBS actions because the required restart did not complete (\(profile.name))", userVisible: true)
+                            return
+                        }
 
                         // Same script-only fast-path check as the synchronous branch.
                         if !Self.profileHasOBSWork(profile) { return }
 
-                        // Resume the OBS pipeline. If restartOBS safely skipped or
-                        // aborted, continueOBSPipeline owns reconnection handling.
+                        // Resume the OBS pipeline after a successful restart or
+                        // a cold launch; safe aborts leave the existing OBS state alone.
                         self.continueOBSPipeline(for: profile, isSimulated: isSimulated)
                     }
                 }
@@ -764,7 +768,7 @@ class DisplayMonitor {
                 selectedSceneCollection: profile.selectedSceneCollection,
                 selectedScene: profile.selectedScene,
                 isSimulated: isSimulated
-            ) { [weak self] in
+            ) { [weak self] canRunOBSWork in
                 guard let self = self else { return }
                 ActivityLog.shared.log(.info,
                     "Running profile script for \"\(profile.name)\" — waiting before OBS actions.",
@@ -777,26 +781,28 @@ class DisplayMonitor {
                 ) { [weak self] outcome in
                     guard let self = self else { return }
                     let elapsed = Date().timeIntervalSince(scriptStartedAt)
+                    let nextPhase = canRunOBSWork ? "Proceeding with OBS actions." : "Leaving OBS unchanged because the required restart did not complete."
                     switch outcome {
                     case .exited(let status):
                         ActivityLog.shared.log(.info,
-                            "Profile script for \"\(profile.name)\" finished in \(String(format: "%.1f", elapsed))s (status \(status)). Proceeding with OBS actions.",
+                            "Profile script for \"\(profile.name)\" finished in \(String(format: "%.1f", elapsed))s (status \(status)). \(nextPhase)",
                             userVisible: true)
                     case .signalled(let signal):
                         ActivityLog.shared.log(.info,
-                            "Profile script for \"\(profile.name)\" terminated by signal \(signal) after \(String(format: "%.1f", elapsed))s. Proceeding with OBS actions.",
+                            "Profile script for \"\(profile.name)\" terminated by signal \(signal) after \(String(format: "%.1f", elapsed))s. \(nextPhase)",
                             userVisible: true)
                     case .failedToLaunch(let reason):
                         ActivityLog.shared.log(.info,
-                            "Couldn't launch profile script for \"\(profile.name)\": \(reason). Proceeding with OBS actions.",
+                            "Couldn't launch profile script for \"\(profile.name)\": \(reason). \(nextPhase)",
                             userVisible: true)
                     case .timedOut:
                         ActivityLog.shared.log(.info,
-                            "Profile script for \"\(profile.name)\" still running after \(Int(Self.restartOrderedScriptTimeout))s; leaving it in the background and proceeding with OBS actions.",
+                            "Profile script for \"\(profile.name)\" still running after \(Int(Self.restartOrderedScriptTimeout))s; leaving it in the background. \(nextPhase)",
                             userVisible: true)
                     }
 
                     // Same script-only fast-path check as the synchronous branch.
+                    guard canRunOBSWork else { return } // Preserve script execution on safe restart aborts, but never change scenes or start outputs afterward.
                     if !Self.profileHasOBSWork(profile) { return }
 
                     // Resume the OBS pipeline only after the post-restart script
