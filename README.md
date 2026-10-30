@@ -15,7 +15,7 @@ Plug in your battlestation displays, attach a USB capture device, or hit a custo
 ![macOS](https://img.shields.io/badge/macOS-13.0%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
 ![Latest](https://img.shields.io/github/v/release/EthanSK/OBScene?label=release)
-![License](https://img.shields.io/badge/License-MIT-green)
+[![License: No-sale source](https://img.shields.io/badge/License-No--sale%20source-purple.svg)](LICENSE)
 
 ## What it does
 
@@ -226,4 +226,4 @@ Rough guidelines:
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+Source-available under [Ethan Source-Available No-Sale Terms 1.0](LICENSE). You can use and modify the covered code, including internally at work, and share it without charge. Selling the software, modified versions, paid access, or bundles requires a separate commercial license. Earlier licenses and third-party rights remain in force. See [scope and release policy](LICENSING.md).
