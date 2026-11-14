@@ -207,6 +207,8 @@ jobs:
     name: Build macOS (universal)
     needs:
       - compute-version
+    # Manual/tag releases skip bump-version; do not inherit that ancestor's skip.
+    if: always() && needs.compute-version.result == 'success'
     runs-on: macos-latest
     outputs:
       # Sparkle EdDSA signature for the release ZIP, computed by
