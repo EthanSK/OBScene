@@ -23,6 +23,7 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 
 mkdir -p "$BUILD_DIR"
 
+python3 "$ROOT/scripts/test-stop-outputs.py"
 python3 "$ROOT/scripts/test-restart-continuation.py"
 
 # --- 1. VerifiedSetEngine ------------------------------------------------

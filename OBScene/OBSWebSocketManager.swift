@@ -2442,10 +2442,11 @@ enum OBSAppController {
     /// Maximum time we'll wait for active StopStream / StopRecord calls to
     /// land (i.e. for `getStreamingActive` / `getRecordingActive` to flip
     /// back to false). The recording-stop path involves obs-ffmpeg-mux
-    /// finalising the on-disk file, which can take several seconds for
-    /// large recordings; 20s is conservative without making the user wait
-    /// forever on a broken OBS.
-    private static let stopOutputsTimeoutSeconds: TimeInterval = 20.0
+    /// finalising the on-disk file. A real 22.6s stop exceeded the old 20s
+    /// limit and left the display-trigger recording setup unfinished. Ethan
+    /// requested one minute: proceed as soon as both outputs confirm stopped,
+    /// but still abort safely at the limit rather than force-quitting OBS.
+    private static let stopOutputsTimeoutSeconds: TimeInterval = 60.0
 
     /// Maximum time we'll wait for the OBS WebSocket to come back up after
     /// we relaunch the app, in seconds.

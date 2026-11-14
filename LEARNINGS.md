@@ -24,6 +24,16 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-11-14
+**Trigger:** The display-trigger recording setup was left unfinished after a slow OBS recording stop; Ethan requested a one-minute wait.
+**Symptom:** OBScene sent StopRecord, abandoned its required restart after 20 seconds, and correctly blocked later scene/profile/output actions. OBS finished stopping at 22.637 seconds, just after the deadline.
+**Root cause:** The stop-completion window was shorter than this observed asynchronous stop. The logs do not establish what made OBS stop slowly, and this is not proof of an OBS or Aitum crash.
+**Fix:** Increase only `OBSAppController.stopOutputsTimeoutSeconds` to 60 seconds. Keep immediate continuation on verified inactive outputs, single stop requests, bounded per-request probes, one completion, and the required-restart safety guard.
+**Guard:** `scripts/test-stop-outputs.py` extracts the actual production waiter and constants onto a virtual clock. It covers the observed delay, quick and near-deadline success, a stop beyond the minute, streaming still active, unknown/missing/late/duplicate replies, and already inactive outputs without controlling live OBS. `--source-ref 2f08cf9` reproduces the old failure. The existing restart-continuation fixture reads the production timeout rather than maintaining another value.
+
+---
+
+---
 **Date:** 2026-10-11T16:00:00Z
 **Trigger:** OBS++ exited after a scene-change warning when the dock was connected.
 **Symptom:** OBS logged that five sources survived scene cleanup, showed `SourceCleanupError`, and later shut down. There was no corresponding new crash report. OBScene's log first said live output state was unknown and the configured restart was aborted, then switched the profile and scene collection anyway.

@@ -6,6 +6,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / "OBScene/OBSWebSocketManager.swift").read_text()
+stop_timeout = source.split("private static let stopOutputsTimeoutSeconds: TimeInterval = ", 1)[1].splitlines()[0]
 entry = "    static func restartOBS(profileName: String," + source.split(
     "    static func restartOBS(profileName: String,", 1
 )[1].split("    /// Pre-flight outcome", 1)[0]
@@ -31,7 +32,7 @@ enum OBSAppController {
     static var restartInFlight = false
     static var lastRestartAt: Date?
     static let throttleWindow = 30.0
-    static let stopOutputsTimeoutSeconds = 20.0
+    static let stopOutputsTimeoutSeconds = STOP_TIMEOUT
     enum LiveState { case inactive, unknown, active(streaming: Bool, recording: Bool) }
     static var state: LiveState = .inactive
     static var stopped = true
@@ -50,6 +51,7 @@ enum OBSAppController {
         beforeRun(restartResult)
     }
 '''
+fixture = fixture.replace("STOP_TIMEOUT", stop_timeout)
 fixture += entry + "\n}\n"
 fixture += r'''
 func check(_ name: String, state: OBSAppController.LiveState = .inactive,
@@ -89,7 +91,7 @@ check("inactive outputs permit successful restart", expected: true, expectedRest
 check("clean output stop permits successful restart", state: .active(streaming: false, recording: true), expected: true, expectedRestarts: 1)
 check("failed relaunch result does not permit OBS actions", restartResult: false, expected: false, expectedRestarts: 1)
 '''
-with tempfile.TemporaryDirectory(prefix="obscene-restart-test-") as directory:
+with tempfile.TemporaryDirectory(prefix="obscene-restart-test-", suffix=".noindex") as directory:
     harness = Path(directory) / "main.swift"
     binary = Path(directory) / "restart-test"
     harness.write_text(fixture)
