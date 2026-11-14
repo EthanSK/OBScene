@@ -1,5 +1,10 @@
 # OBScene Project Instructions
 
+## Code review ownership
+
+- OBScene is a fully vibe coded project. Ethan: "I'm not reviewing the code."
+- Agents handle required code review and validation themselves. Ask Ethan only for genuine user decisions or necessary real-world/manual acceptance, not routine source review. Do not leave completed OBScene changes waiting for Ethan to review the code.
+
 ## UI visual QA
 
 - Any change to SwiftUI layout, text, control sizing or placement, profile tabs, menus, or Settings presentation must be built and screenshot-tested before commit and release.
