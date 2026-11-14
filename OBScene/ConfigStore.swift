@@ -582,26 +582,27 @@ struct TriggerProfile: Codable, Equatable, Identifiable {
     /// value when this key is absent.
     var delayBetweenActions: Double = 2.0
 
-    /// Optional shell command to run when this profile activates (immediately
-    /// before the OBS actions fire). Runs detached under the user's login
-    /// shell (`$SHELL -l -c <cmd>`, falling back to `/bin/bash -l -c`), and
-    /// stdout/stderr are appended to `~/Library/Logs/OBScene/script-runs.log`
-    /// so the main app never blocks on the script. Defaults to empty, which
-    /// means no script is run.
+    /// Optional shell command to run when this profile activates. It uses the
+    /// user's login shell (`$SHELL -l -c <cmd>`, falling back to
+    /// `/bin/bash -l -c`) and appends stdout/stderr to
+    /// `~/Library/Logs/OBScene/script-runs.log`. Profiles without an OBS restart
+    /// launch it detached; restart-ordered profiles wait up to 60 seconds before
+    /// their next phase. Defaults to empty, which means no script is run. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
     ///
     /// Security note: this runs arbitrary shell. Only configure scripts you
     /// trust — this is an intentional power-user hook, not a sandboxed API.
     var runScript: String = ""
 
     /// When true, OBScene will gracefully quit OBS, wait for it to relaunch,
-    /// and only then run `runScript`. This is a workaround for the Custom
+    /// run `runScript`, wait for the script, and only then run later profile
+    /// actions. This is a workaround for the Custom
     /// Browser Dock refresh limitation: there is no programmatic refresh API
     /// for docks, so a full app restart is the only reliable way to make the
     /// dock pick up an updated URL / cookie / channel.
     ///
-    /// The restart is automatically SKIPPED if OBS is currently recording or
-    /// streaming — we never kill a live capture session. In that case the
-    /// script still runs (just without the preceding restart).
+    /// If OBS is recording or streaming, OBScene first requests a graceful
+    /// output stop and aborts the restart if that stop cannot be verified. A
+    /// configured start action can restore the required output after relaunch.
     ///
     /// Defaults to false so existing profiles keep their behaviour after an
     /// upgrade.

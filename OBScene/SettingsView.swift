@@ -591,10 +591,8 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                // Run-on-activate shell hook. Optional; blank = no script.
-                // Runs detached under the user's login shell ($SHELL -l -c,
-                // falling back to /bin/bash) when the profile fires, with
-                // stdout/stderr logged to ~/Library/Logs/OBScene/script-runs.log.
+                // Run-on-activate shell hook. Without a restart it detaches;
+                // restart-ordered hooks wait before their next phase. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
                 Divider().padding(.vertical, 2)
                 HStack(alignment: .firstTextBaseline) {
                     Text("Run on activate:")
@@ -602,7 +600,7 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                 }
-                Text("Shell command executed when this profile activates. Runs detached under your login shell (zsh/bash -l -c); output is logged to ~/Library/Logs/OBScene/script-runs.log. Leave blank to disable.")
+                Text("Shell command run when this profile activates, under your login shell (zsh/bash -l -c). Output is logged to ~/Library/Logs/OBScene/script-runs.log. With Restart OBS off it launches detached and OBScene moves straight on to the profile's other actions. Leave blank to disable.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -610,11 +608,11 @@ struct SettingsView: View {
                 // Restart-OBS-before-run hook. Workaround for the Custom Browser
                 // Dock refresh limitation — OBS exposes no programmatic refresh
                 // API for docks, so a full app restart is the only reliable way
-                // to force them to reload with updated URLs / cookies. Skipped
-                // automatically if OBS is currently recording or streaming.
+                // to force them to reload with updated URLs / cookies. Active
+                // outputs are stopped gracefully before restart. (Codex task: 019ff120-ea11-71a3-8b65-c55b45cac2fe)
                 Toggle("Restart OBS before running", isOn: profile.restartOBSBeforeRun)
                     .padding(.top, 2)
-                Text("Quits OBS gracefully, waits for it to relaunch, then runs the command. Useful for refreshing custom browser docks. Skipped if OBS is currently recording or streaming (won't kill a live session).")
+                Text("Quits OBS gracefully, waits for it to relaunch, then runs the command and waits up to 60 seconds before the profile's remaining actions. Useful for refreshing custom browser docks. Any active recording or streaming is stopped first, and the restart is skipped if that stop can't be confirmed, so a live session is never cut blind. Add a Start Recording or Start Streaming action to bring outputs back afterwards.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -627,7 +625,7 @@ struct SettingsView: View {
                     Toggle("Run script before restart", isOn: profile.runScriptBeforeRestart)
                         .padding(.leading, 18)
                         .padding(.top, 2)
-                    Text("Fire the script BEFORE quitting OBS, instead of after the relaunch. OBScene waits for the script's process to exit (capped at 60s) before sending OBS the quit signal, so any side effects land first. If the script hangs past the cap it's left running in the background and the restart proceeds anyway.")
+                    Text("Runs the command BEFORE quitting OBS instead of after the relaunch, and waits up to 60 seconds for it to exit so its side effects land first. If it's still running at 60 seconds it's left running in the background and the restart goes ahead.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 18)

@@ -1,9 +1,9 @@
 //
 // ScriptRunner.swift — per-profile "Run on activate" shell hook.
 //
-// When a TriggerProfile with a non-empty `runScript` fires, we launch the
-// script detached via `/bin/bash -l -c <script>` so the main app never blocks
-// on it. Stdout and stderr are tee'd (via a Pipe + timestamped write) to
+// When a TriggerProfile with a non-empty `runScript` fires, we launch it via
+// `/bin/bash -l -c <script>`. Callers can either detach or completion-gate the
+// next profile phase. Stdout and stderr are tee'd (via a Pipe + timestamped write) to
 // `~/Library/Logs/OBScene/script-runs.log` so the user can audit what ran
 // without needing to attach a debugger.
 //
@@ -68,7 +68,7 @@ enum ScriptRunner {
 
     /// Outcome of a `runAndWait` invocation. Distinct from `Process.TerminationStatus`
     /// because we need to surface launch-failures and timeouts as first-class
-    /// values: callers (specifically the run-script-before-restart path) want
+    /// values: restart-ordered callers want
     /// to log + proceed in all three cases without inspecting an `Error`.
     enum RunOutcome {
         /// Process exited normally; integer is the exit status (0 = success).
@@ -93,8 +93,8 @@ enum ScriptRunner {
     static func run(script: String, profileName: String) {
         // The fire-and-forget variant is a thin wrapper over `runAndWait` —
         // we just don't observe the completion. Keeping the wrapper preserves
-        // every existing call-site (the after-restart path, the no-restart
-        // path, and the legacy "script only" path) without forcing them to
+        // existing fire-and-forget call-sites (the no-restart and legacy
+        // "script only" paths) without forcing them to
         // care about the new completion handler.
         _ = runAndWait(
             script: script,
@@ -116,8 +116,8 @@ enum ScriptRunner {
     ///     fire `completion(.timedOut)` and STOP observing the process — the
     ///     child keeps running in the background (re-parented to launchd if
     ///     OBScene quits later) so the user's script side effects still land.
-    ///     We do NOT SIGTERM/SIGKILL the child: the run-script-before-restart
-    ///     caller wants the script's work to finish even if OBScene moves on.
+    ///     We do NOT SIGTERM/SIGKILL the child: restart-ordered callers want
+    ///     the script's work to finish even if OBScene moves on.
     ///   - If `timeout` is nil, we wait forever for the process to exit. This
     ///     is what the legacy `run(script:profileName:)` path effectively does
     ///     (it just doesn't observe the completion).

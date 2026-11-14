@@ -483,9 +483,7 @@ final class SafeModeDialogDismisser {
             // the watcher, but the log message is much less alarming for the
             // benign one.
             if NSRunningApplication(processIdentifier: pid) == nil {
-                let stillRunning = NSWorkspace.shared.runningApplications.contains {
-                    $0.bundleIdentifier == "com.obsproject.obs-studio"
-                }
+                let stillRunning = !OBSApplicationResolver.runningApplications().isEmpty
                 let message = stillRunning
                     ? "OBS pid \(pid) gone but a fresh OBS is running — stopping Safe Mode watcher"
                     : "OBS process exited before dialog appeared"

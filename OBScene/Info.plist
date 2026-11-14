@@ -16,10 +16,21 @@
 	<string>OBScene</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ethansk.OBScene.restartOBS</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>obscene</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleShortVersionString</key>
-	<string>1.62.0</string>
+	<string>1.64.0</string>
 	<key>CFBundleVersion</key>
-	<string>16200</string>
+	<string>16400</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>

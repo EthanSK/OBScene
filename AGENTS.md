@@ -17,3 +17,7 @@ OBSCENE_RENDER_SETTINGS_WIDTH=640 \
 OBSCENE_RENDER_SETTINGS_HEIGHT=1200 \
 build/OBScene.app/Contents/MacOS/OBScene
 ```
+
+## Publishing
+
+- After completing each requested OBScene change, commit it and push its branch unless Ethan explicitly says not to publish it.

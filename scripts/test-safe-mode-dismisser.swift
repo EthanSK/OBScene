@@ -370,6 +370,15 @@ func test_predicate_rememberChoiceAliases() {
     dExpect(!SafeModeDismissalLogic.looksLikeRememberChoiceCheckbox("Enable Studio Mode"), "unrelated")
 }
 
+func test_obsApplicationResolver_recognisesBothAppIdentities() {
+    dismisserCurrentTestName = "obsApplicationResolver_recognisesBothAppIdentities"
+    dExpectEqual(OBSApplicationResolver.bundleIdentifiers.first, "com.ethansk.obs-plus-plus", "cold-launch preference")
+    dExpect(OBSApplicationResolver.isOBSBundleIdentifier("com.ethansk.obs-plus-plus"), "OBS++ bundle")
+    dExpect(OBSApplicationResolver.isOBSBundleIdentifier("com.obsproject.obs-studio"), "official OBS bundle")
+    dExpect(!OBSApplicationResolver.isOBSBundleIdentifier("com.example.obs"), "unrelated bundle")
+    dExpect(!OBSApplicationResolver.isOBSBundleIdentifier(nil), "missing bundle")
+}
+
 // MARK: - Runner
 
 @main
@@ -390,7 +399,8 @@ struct SafeModeDismisserTestRunner {
             ("tick_abandonsOnAmbiguousDialog", test_tick_abandonsOnAmbiguousDialog),
             ("tick_abandonsIfPressFails", test_tick_abandonsIfPressFails),
             ("predicate_launchNormallyAliases", test_predicate_launchNormallyAliases),
-            ("predicate_rememberChoiceAliases", test_predicate_rememberChoiceAliases)
+            ("predicate_rememberChoiceAliases", test_predicate_rememberChoiceAliases),
+            ("obsApplicationResolver_recognisesBothAppIdentities", test_obsApplicationResolver_recognisesBothAppIdentities)
         ]
 
         print("== SafeModeDialogDismisser unit tests ==")

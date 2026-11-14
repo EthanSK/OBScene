@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # run-tests.sh — compile + run OBScene unit tests.
 #
-# Runs FIVE unit-test binaries sequentially:
+# Runs SIX unit-test binaries sequentially:
 #   1. VerifiedSetEngine retry/verify state machine (2026-04-18 bug fix).
 #   2. SafeModeDialogDismisser decision logic (2026-04-18 Safe Mode auto-
 #      dismissal feature — v1.26).
 #   3. File-transfer copy/hash/retention destructive gate.
 #   4. macOS Screen Capture wake/display recovery policy.
 #   5. AppConfig forward-compatible settings decoding.
+#   6. OBS startup arguments for safe profile / collection selection.
 #
 # Each binary is produced with `swiftc -parse-as-library` and has its own
 # `@main` entrypoint, so they must be compiled separately.
@@ -21,6 +22,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 
 mkdir -p "$BUILD_DIR"
+
+python3 "$ROOT/scripts/test-stop-outputs.py"
+python3 "$ROOT/scripts/test-restart-continuation.py"
 
 # --- 1. VerifiedSetEngine ------------------------------------------------
 VERIFIED_BIN="$BUILD_DIR/obscene-unit-tests"
@@ -46,6 +50,7 @@ xcrun swiftc \
   -o "$SAFEMODE_BIN" \
   "$ROOT/OBScene/FileTransferModels.swift" \
   "$ROOT/OBScene/ConfigStore.swift" \
+  "$ROOT/OBScene/OBSApplicationResolver.swift" \
   "$ROOT/OBScene/SafeModeDialogDismisser.swift" \
   "$ROOT/scripts/test-safe-mode-dismisser.swift"
 echo "[test] running SafeModeDialogDismisser tests"
@@ -86,3 +91,14 @@ xcrun swiftc \
   "$ROOT/scripts/test-app-config.swift"
 echo "[test] running AppConfig tests"
 "$APP_CONFIG_BIN"
+
+# --- 6. OBS launch arguments --------------------------------------------
+OBS_LAUNCH_ARGUMENTS_BIN="$BUILD_DIR/obscene-obs-launch-arguments-tests"
+echo "[test] compiling OBS launch-argument tests -> $OBS_LAUNCH_ARGUMENTS_BIN"
+xcrun swiftc \
+  -parse-as-library \
+  -o "$OBS_LAUNCH_ARGUMENTS_BIN" \
+  "$ROOT/OBScene/OBSLaunchArguments.swift" \
+  "$ROOT/scripts/test-obs-launch-arguments.swift"
+echo "[test] running OBS launch-argument tests"
+"$OBS_LAUNCH_ARGUMENTS_BIN"

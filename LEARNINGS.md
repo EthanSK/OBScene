@@ -24,6 +24,70 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-11-14
+**Trigger:** The display-trigger recording setup was left unfinished after a slow OBS recording stop; Ethan requested a one-minute wait.
+**Symptom:** OBScene sent StopRecord, abandoned its required restart after 20 seconds, and correctly blocked later scene/profile/output actions. OBS finished stopping at 22.637 seconds, just after the deadline.
+**Root cause:** The stop-completion window was shorter than this observed asynchronous stop. The logs do not establish what made OBS stop slowly, and this is not proof of an OBS or Aitum crash.
+**Fix:** Increase only `OBSAppController.stopOutputsTimeoutSeconds` to 60 seconds. Keep immediate continuation on verified inactive outputs, single stop requests, bounded per-request probes, one completion, and the required-restart safety guard.
+**Guard:** `scripts/test-stop-outputs.py` extracts the actual production waiter and constants onto a virtual clock. It covers the observed delay, quick and near-deadline success, a stop beyond the minute, streaming still active, unknown/missing/late/duplicate replies, and already inactive outputs without controlling live OBS. `--source-ref 2f08cf9` reproduces the old failure. The existing restart-continuation fixture reads the production timeout rather than maintaining another value.
+
+---
+
+---
+**Date:** 2026-10-11T16:00:00Z
+**Trigger:** OBS++ exited after a scene-change warning when the dock was connected.
+**Symptom:** OBS logged that five sources survived scene cleanup, showed `SourceCleanupError`, and later shut down. There was no corresponding new crash report. OBScene's log first said live output state was unknown and the configured restart was aborted, then switched the profile and scene collection anyway.
+**Root cause:** `restartOBS` used a result-free continuation for both successful restarts and safety aborts. Both restart/script orderings consequently allowed the remaining OBS pipeline after a refused restart. This reproduced the previously identified unsafe live collection-switch path; the exact owner retaining the sources remains unproven.
+**Fix:** Pass an explicit continuation permission through restart preflight and relaunch outcomes. Both DisplayMonitor orderings still honor the configured script behavior but skip profile, collection, scene, and output actions when the required restart did not succeed. Keep the existing cold-launch path, live-output checks, Space restoration, and OBS's protective error intact.
+**Guard:** `scripts/test-restart-continuation.py` exercises the production restart entry in isolation for ten outcomes, including unknown state, disconnection, failed stops, throttling, and cold launch. Both caller guards are retained in source checks; the full test suite and universal application build pass. Do not claim this proves the underlying source-retention bug is fixed, and do not install the older public v1.62 over this safety branch.
+
+---
+
+---
+**Date:** 2026-08-19T17:52:00Z
+**Trigger:** Final Release verification after adding restart-ordered script gating
+**Symptom:** `scripts/build-app.sh` compiled successfully, but the Xcode Release scheme failed because `OBSWebSocketManager.swift` could not find `OBSLaunchArguments`.
+**Root cause:** The earlier helper was added as a Swift file and therefore picked up by the shell build's source glob, but it was never added to the Xcode project's file group and Sources phase.
+**Fix:** Add `OBSLaunchArguments.swift` to both the PBX file references and the OBScene Sources build phase.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** When adding a Swift source file, verify both `scripts/build-app.sh` and the Xcode Release scheme; the two build paths discover source files differently.
+
+---
+
+---
+**Date:** 2026-08-19T17:35:00Z
+**Trigger:** User required the display-plug profile to restart OBS before its Restream script and every later OBS action
+**Symptom:** With `restartOBSBeforeRun` enabled and `runScriptBeforeRestart` disabled, OBScene restarted OBS and launched the profile script, but immediately continued to profile, collection, scene, and output actions while the script was still running.
+**Root cause:** The script-before-restart branch used `ScriptRunner.runAndWait`, while the default restart-before-script branch still used the detached `ScriptRunner.run` path. The UI ordering choice therefore changed launch order but did not provide a completion barrier before later actions.
+**Fix:** Run the post-restart script through `ScriptRunner.runAndWait` too, and resume the OBS pipeline only after exit, launch failure, signal termination, or the existing 60-second safety timeout. The timeout leaves the script running in the background and proceeds so a broken script cannot lock the trigger forever.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** Keep both restart/script orderings completion-gated. In restart-before-script mode, never restore a detached script launch before recording/streaming actions; the user's Restream preparation must finish first.
+
+---
+
+---
+**Date:** 2026-08-19T17:12:00Z
+**Trigger:** The 3000AD OBS preview remained black after a controlled restart during display setup
+**Symptom:** The webcam rendered but the main capture-card picture was black. `GetSourceScreenshot` could not render the `Capture Card Device` source, and substituting the generic `USB Video` endpoint produced `Configured format not found on device`.
+**Root cause:** OBS restarted while the exact `Live Gamer Ultra 2.1-Video` endpoint (`0x20000007ca2553`) was absent. The source was still configured for that device and its 3440x1440 60 FPS format, so there was no compatible fallback. After the USB capture device was replugged, OBS received its connect event and the exact source produced frames again.
+**Fix:** Preserve the exact Live Gamer device binding and supported 3440x1440 60 FPS format; reconnect the hardware endpoint when it is genuinely absent. Do not silently bind this source to an arbitrary generic UVC device.
+**Commit:** runtime diagnosis; no source change
+**Guard:** Diagnose the OBS log and input property list before changing capture settings. Require the exact device endpoint and a successful source-frame probe before calling the capture recovered; a live webcam or non-black composite preview does not prove the capture-card input works.
+
+---
+
+---
+**Date:** 2026-08-18T21:00:00Z
+**Trigger:** Plugging in the dock repeatedly made OBS freeze or exit while OBScene changed to the 3000AD profile and scene collection
+**Symptom:** The `Displays (plug in)` trigger could switch the OBS profile, stall while switching the scene collection, and then lose the WebSocket because OBS exited. The same source-clear failure appeared intermittently across several plug-in events.
+**Root cause:** OBScene applied the selected profile and scene collection through the WebSocket after Aitum++ had loaded. Changing the scene collection at runtime tears down and rebuilds every source while Aitum++ owns additional canvases; on this Mac that transition intermittently failed to release five shared sources and destabilised OBS. The existing controlled-restart path also relaunched OBS without its selected state, so it could not avoid the same post-launch reload.
+**Fix:** Pass the trigger's selected profile, scene collection, and scene to OBS's supported `--profile`, `--collection`, and `--scene` startup arguments during cold launches and controlled restarts. `VerifiedSetEngine` already checks the current value before applying a WebSocket change, so once OBS starts in the requested state the dangerous runtime reload is skipped.
+**Commit:** branch `codex/obscene-safe-display-switch`
+**Guard:** `test-obs-launch-arguments.swift` verifies exact argument ordering, preserves names containing spaces as single arguments, and omits empty selections. Keep the display trigger's `restartOBSBeforeRun` enabled when it changes between Aitum++ scene collections; do not revert to a live WebSocket-only collection switch for this workflow.
+
+---
+
+---
 **Date:** 2026-08-01T13:25:49Z
 **Trigger:** User reported the v1.60 Settings header was visibly broken and requested drag-reorderable profile tabs plus a 2-second default action gap
 **Symptom:** At the user's narrower Settings width, the `Trigger:` label collapsed into one character per line between the profile name and the fixed-width trigger picker. Profile tabs could not be reordered, and newly created profiles fired actions simultaneously by default.
