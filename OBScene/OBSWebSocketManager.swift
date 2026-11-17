@@ -462,14 +462,34 @@ class OBSWebSocketManager: ObservableObject {
         let eventData = event["eventData"] as? [String: Any]
         let outputState = eventData?["outputState"] as? String
 
-        guard OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
-            eventType: eventType,
-            outputState: outputState
-        ) else {
+        let shouldNotifyStreamStarted =
+            OBSStreamStartNotificationPolicy.shouldNotify(
+                eventType: eventType,
+                outputState: outputState
+            )
+        let shouldScheduleRecordingRecovery =
+            OBSRecordingCaptureRecoveryPolicy.shouldSchedule(
+                eventType: eventType,
+                outputState: outputState
+            )
+
+        guard shouldNotifyStreamStarted || shouldScheduleRecordingRecovery else {
             return
         }
 
         DispatchQueue.main.async {
+            if shouldNotifyStreamStarted {
+                ActivityLog.shared.log(
+                    .streamingStarted,
+                    "Streaming started"
+                )
+                UserNotifier.post(
+                    title: "OBS is live",
+                    body: "Streaming has started. Stop it now if this was accidental."
+                )
+            }
+
+            guard shouldScheduleRecordingRecovery else { return }
             DisplayMonitor.shared.scheduleCaptureRecovery(
                 for: .recordingStarted
             )
@@ -1115,10 +1135,10 @@ class OBSWebSocketManager: ObservableObject {
     }
 
     func startStreaming() {
-        sendRequest("StartStream") { _ in
-            ActivityLog.shared.log(.streamingStarted, "Streaming started")
-            UserNotifier.post(title: "OBScene", body: "Streaming started")
-        }
+        // The request acknowledgement is not proof that output actually
+        // started, and notifying here would duplicate the authoritative
+        // StreamStateChanged notification handled above.
+        sendRequest("StartStream")
     }
 
     func stopStreaming() {

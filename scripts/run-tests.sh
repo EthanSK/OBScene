@@ -74,6 +74,7 @@ echo "[test] compiling macOS capture recovery tests -> $CAPTURE_RECOVERY_BIN"
 xcrun swiftc \
   -parse-as-library \
   -o "$CAPTURE_RECOVERY_BIN" \
+  "$ROOT/OBScene/OBSOutputEventPolicy.swift" \
   "$ROOT/OBScene/MacOSCaptureRecovery.swift" \
   "$ROOT/OBScene/CaptureRecoveryDiagnostics.swift" \
   "$ROOT/scripts/test-macos-capture-recovery.swift"

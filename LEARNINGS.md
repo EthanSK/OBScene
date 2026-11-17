@@ -4,6 +4,10 @@ Per-repo institutional memory for fixes. Every entry below is a real bug we hit 
 
 Maintained by the `learnings` skill — see `~/.claude/skills/learnings/skill.md`.
 
+## 2026-11-17 — Confirm streaming from the OBS output event
+
+An acknowledged StartStream request can precede actual live output. Subscribe to the Outputs events already used by recording recovery. Report the streaming start only for StreamStateChanged with OBS_WEBSOCKET_OUTPUT_STARTED. This also alerts on a start initiated in OBS itself and keeps recording capture recovery independent. The capture-recovery suite checks the intermediate, stopped and unrelated recording states.
+
 ## Format
 
 Each entry looks like:

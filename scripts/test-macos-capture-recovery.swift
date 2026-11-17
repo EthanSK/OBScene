@@ -249,6 +249,38 @@ private func testRecordingStartedEventMatching() {
     )
 }
 
+private func testStreamingStartedEventMatching() {
+    currentTest = "streamingStartedEventMatching"
+    expect(
+        OBSStreamStartNotificationPolicy.shouldNotify(
+            eventType: "StreamStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "notifies only after OBS confirms streaming started"
+    )
+    expect(
+        !OBSStreamStartNotificationPolicy.shouldNotify(
+            eventType: "StreamStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTING"
+        ),
+        "ignores the intermediate streaming-starting state"
+    )
+    expect(
+        !OBSStreamStartNotificationPolicy.shouldNotify(
+            eventType: "StreamStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STOPPED"
+        ),
+        "does not alert when streaming stops"
+    )
+    expect(
+        !OBSStreamStartNotificationPolicy.shouldNotify(
+            eventType: "RecordStateChanged",
+            outputState: "OBS_WEBSOCKET_OUTPUT_STARTED"
+        ),
+        "ignores started events for other outputs"
+    )
+}
+
 private func testSerialGateCoalescesWithoutOverlap() {
     currentTest = "serialGateCoalescesWithoutOverlap"
     var started: [MacOSCaptureRecoveryRequest] = []
@@ -526,6 +558,7 @@ struct MacOSCaptureRecoveryTests {
         testMultipleInputsReactivateSerially()
         testRecoveryTriggerSchedules()
         testRecordingStartedEventMatching()
+        testStreamingStartedEventMatching()
         testSerialGateCoalescesWithoutOverlap()
         testScreenshotHealthRejectsBlackFrames()
         testScreenshotHealthAcceptsVisibleFrames()
@@ -533,7 +566,7 @@ struct MacOSCaptureRecoveryTests {
         testDiagnosticsDeleteOnlyExpiredNDJSON()
 
         if failures.isEmpty {
-            print("MacOSCaptureRecovery tests passed (13 tests)")
+            print("MacOSCaptureRecovery tests passed (14 tests)")
         } else {
             print("\(failures.count) MacOSCaptureRecovery test failure(s)")
             exit(1)
