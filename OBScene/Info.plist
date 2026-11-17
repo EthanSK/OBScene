@@ -16,6 +16,8 @@
 	<string>OBScene</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.65.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -27,10 +29,8 @@
 			</array>
 		</dict>
 	</array>
-	<key>CFBundleShortVersionString</key>
-	<string>1.64.0</string>
 	<key>CFBundleVersion</key>
-	<string>16400</string>
+	<string>16500</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
