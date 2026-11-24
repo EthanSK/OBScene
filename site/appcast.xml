@@ -7,6 +7,15 @@
     <language>en</language>
     <atom:link href="https://ethansk.github.io/OBScene/appcast.xml" rel="self" type="application/rss+xml" />
     <item>
+      <title>OBScene v1.66</title>
+      <pubDate>Tue, 24 Nov 2026 18:21:29 +0000</pubDate>
+      <sparkle:version>16600</sparkle:version>
+      <sparkle:shortVersionString>1.66.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/EthanSK/OBScene/releases/tag/v1.66</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/EthanSK/OBScene/releases/download/v1.66/OBScene-1.66.0-mac-universal.zip" length="4439536" type="application/octet-stream" sparkle:version="16600" sparkle:shortVersionString="1.66.0" sparkle:edSignature="bvw4kgkDwEzfAVm7gZ8XNAqPyi9JwnzskHMLVetb1PpppxxLVKxhWVLrmbM0J3QlWSIlS1Q27fd1Y8wrUy7TAQ==" />
+    </item>
+    <item>
       <title>OBScene v1.65</title>
       <pubDate>Tue, 17 Nov 2026 23:15:20 +0000</pubDate>
       <sparkle:version>16500</sparkle:version>
